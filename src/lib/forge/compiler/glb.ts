@@ -29,7 +29,7 @@ export function writeGlb(meshes: GlbMesh[]): Buffer {
     if (mesh.indices?.length) { accessors.push({ bufferView: push(mesh.indices, 34963), componentType: 5125, count: mesh.indices.length, type: "SCALAR" }); primitive.indices = accessors.length - 1; }
     const [r, g, b] = mesh.color ?? [0.62, 0.7, 0.78];
     materials.push({ name: `${mesh.name}-mat`, pbrMetallicRoughness: { baseColorFactor: [r, g, b, 1], metallicFactor: 0.4, roughnessFactor: 0.5 } });
-    meshesJson.push({ name: mesh.name, primitives: [primitive] });
+    meshesJson.push({ name: `${mesh.name}_mesh`, primitives: [primitive] });
     nodes.push({ name: mesh.name, mesh: meshesJson.length - 1 });
   }
   const json = { asset: { version: "2.0", generator: "SpatialForge compiler" }, scene: 0, scenes: [{ nodes: nodes.map((_, i) => i) }], nodes, meshes: meshesJson, materials, accessors, bufferViews, buffers: [{ byteLength: offset }] };

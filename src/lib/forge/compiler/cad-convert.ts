@@ -183,8 +183,11 @@ export async function convertCad(bytes: Buffer, name: string, format: CadFormat)
     const c = box.getCenter(new THREE.Vector3());
     for (let k = 0; k < positions.length; k += 3) { positions[k] -= c.x; positions[k + 1] -= c.y; positions[k + 2] -= c.z; }
     const clean = mesh.name.replace(/[^\w .()#+-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || `Part ${i + 1}`;
-    const n = (used.get(clean) ?? 0) + 1; used.set(clean, n);
-    const node = n === 1 ? clean : `${clean} (${n})`;
+    // Node names must survive GLTFLoader's sanitizeNodeName (whitespace -> "_", "[].:/" removed) so getObjectByName(node) finds them.
+    const safe = clean.replace(/\s/g, "_").replace(/[[\].:/]/g, "") || `Part_${i + 1}`;
+    let node = safe, n = 1;
+    while (used.has(node)) node = `${safe}_${++n}`;
+    used.set(node, 1);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     if (mesh.indices) geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));

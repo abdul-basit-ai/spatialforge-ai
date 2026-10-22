@@ -68,7 +68,7 @@ export const CadDraftSchema = z.object({
   summary: z.coerce.string().default(""),
   domain: z.enum(["mechanical", "mechatronic"]).catch("mechanical").default("mechanical"),
   notes: z.coerce.string().default(""),
-  parts: z.array(z.object({ id: z.coerce.string(), name: z.coerce.string(), category: z.enum(CATEGORIES as [PartCategory, ...PartCategory[]]).catch("other"), description: optText, symmetryDeg: optNum, color: optText })).default([]),
+  parts: z.array(z.object({ id: z.coerce.string(), name: z.coerce.string(), category: z.enum(CATEGORIES as [PartCategory, ...PartCategory[]]).optional().catch(undefined), description: optText, symmetryDeg: optNum, color: optText })).default([]),
   steps: z.array(StepDraftSchema).default([]),
 });
 export type CadDraft = z.infer<typeof CadDraftSchema>;

@@ -83,12 +83,17 @@ export function normalizeScenario(scenario: ForgeScenario): ForgeScenario {
     step.requires = steps.length ? [steps[steps.length - 1].id] : [];
     steps.push(step);
   }
-  // Parts nobody installs get a placement step at the end so the scenario stays playable.
+  // Parts nobody installs get a placement step (before a trailing inspection) so the scenario stays playable.
+  const orphans: ForgeStep[] = [];
   for (const part of parts) {
     if (base.has(part.id) || installed.has(part.id)) continue;
     const id = uniqueSlug(`place-${part.id}`, stepUsed, "place");
-    steps.push({ id, kind: "place", title: `Install the ${part.name}`, instruction: `Fit the ${part.name} into its seat.`, voiceLine: `Fit the ${part.name}.`, partIds: [part.id], requires: steps.length ? [steps[steps.length - 1].id] : [] });
+    orphans.push({ id, kind: "place", title: `Install the ${part.name}`, instruction: `Fit the ${part.name} into its seat.`, voiceLine: `Fit the ${part.name}.`, partIds: [part.id], requires: [] });
     installed.add(part.id);
+  }
+  if (orphans.length) {
+    steps.splice(steps.at(-1)?.kind === "inspect" ? steps.length - 1 : steps.length, 0, ...orphans);
+    steps.forEach((step, i) => { step.requires = i ? [steps[i - 1].id] : []; });
   }
   return { ...scenario, parts, baseParts, steps };
 }

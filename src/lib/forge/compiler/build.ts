@@ -101,7 +101,7 @@ export function mergeCadDraft(skeleton: Skeleton, draft: CadDraft): { scenario: 
   const parts = base.parts.map((part) => {
     const info = partInfo.get(part.id);
     if (!info) return part;
-    const category = info.category ?? part.category;
+    const category = info.category && info.category !== "other" ? info.category : part.category; // keep the name-based guess over a vague "other"
     const symmetry = info.symmetryDeg !== undefined && Number.isFinite(info.symmetryDeg) ? clamp(info.symmetryDeg, 0, 360) : part.mate.symmetryDeg;
     return { ...part, name: info.name?.trim() || part.name, category, description: info.description || part.description, color: part.color === CATEGORY_COLORS[part.category] ? (/^#[0-9a-f]{6}$/i.test(info.color ?? "") ? info.color! : CATEGORY_COLORS[category]) : part.color, mate: { ...part.mate, symmetryDeg: symmetry } };
   });
