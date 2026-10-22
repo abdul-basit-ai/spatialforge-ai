@@ -35,8 +35,12 @@ With `AIVEN_CA_CERT` set, PostgreSQL uses verified TLS (equivalent to `sslmode=v
 
 ```sh
 docker build -t spatialforge-ai .
-docker run --rm -p 3000:3000 --env-file .env.production spatialforge-ai
+# Keep the env file OUTSIDE the repo (the build context): Next.js standalone output copies any .env/.env.production
+# it finds into the image. `.dockerignore` and `.gitignore` exclude every `.env*` file except `.env.example` as a backstop.
+docker run --rm -p 3000:3000 --env-file ../spatialforge.env spatialforge-ai
 ```
+
+On a managed platform, use its secret store instead of an env file.
 
 The container listens on `PORT` (default 3000) on `0.0.0.0` and runs as a non-root user. Its built-in `HEALTHCHECK` calls `GET /api/health`, which returns 200 when every configured service is reachable and 503 when one is down.
 
@@ -48,7 +52,7 @@ Completed runs queue jobs on the Valkey list `sf:critic:jobs`. They are processe
 curl -X POST https://<app>/api/agent/critic -H "x-admin-token: $ADMIN_TOKEN" -H "content-type: application/json" -d '{"max":10}'
 ```
 
-Failed jobs are kept on `sf:critic:failed`. The route allows up to 180 s, because the LLM is a reasoning model.
+Jobs are moved to `sf:critic:processing` while they run and removed only when the Critic finishes; a job whose worker died is put back on the queue by the next call (after its 5-minute claim expires). Failed jobs are kept on `sf:critic:failed`. The route allows up to 180 s, because the LLM is a reasoning model, and stops starting new jobs after 60 s, so one call may process fewer than `max` jobs; call again while `queueEmpty` is false.
 
 ## 5. Smoke test the deployed URL
 

@@ -6,6 +6,7 @@ import { allowLlmCall, valkey, VALKEY_KEYS, withTimeout } from "@/lib/db/valkey"
 import { errorMessage } from "@/lib/db/tls";
 import { activeGuidance } from "./guidance-store";
 import { completeJson, llmConfigured } from "./llm";
+import { knownParts } from "./tools";
 
 // Coach agent: active guidance + the operator's profile -> a short personal briefing and per-step hint overrides.
 // Approved guidance always wins over personal overrides; personal text only fills fields the version leaves empty.
@@ -13,7 +14,8 @@ type Mistake = { stepId: string; partId: string; kind: string; requiredPartId?: 
 export type OperatorProfile = { runs?: number; lastRun?: Mistake[]; habits?: Mistake[]; summary?: string };
 const CACHE_SECONDS = 6 * 3600, FALLBACK_CACHE_SECONDS = 300;
 
-const shortOf = (scenario: ScenarioId, id?: string) => partFor(scenario, (id || "") as PartId)?.short ?? id ?? "part";
+// Never echo a raw id: profile rows come from client events, so anything that is not a known part reads as "part".
+const shortOf = (scenario: ScenarioId, id?: string) => partFor(scenario, (id || "") as PartId)?.short ?? "part";
 
 function mistakeAdvice(scenario: ScenarioId, m: Mistake): { said: string; fix: string; step: PartId | null; personal: StepGuidance } {
   const part = partFor(scenario, m.partId as PartId);
@@ -32,8 +34,8 @@ export function rulesBriefing(scenario: ScenarioId, operator: string, version: s
   const definition = getScenario(scenario);
   const sentences: string[] = [];
   const personal: Guidance = { steps: {} };
-  const last = (profile?.lastRun ?? []).filter((m) => m.kind !== "tracking-lost").sort((a, b) => b.corrections - a.corrections)[0];
-  const habit = (profile?.habits ?? []).filter((m) => m.kind !== "tracking-lost" && m.runs >= 2)[0];
+  const last = (profile?.lastRun ?? []).filter((m) => knownParts(scenario, m.stepId, m.partId, m.requiredPartId)).filter((m) => m.kind !== "tracking-lost").sort((a, b) => b.corrections - a.corrections)[0];
+  const habit = (profile?.habits ?? []).filter((m) => knownParts(scenario, m.stepId, m.partId, m.requiredPartId)).filter((m) => m.kind !== "tracking-lost" && m.runs >= 2)[0];
   const focus = last ?? habit;
   let focusStep: PartId | null = null;
   if (focus) {
@@ -59,7 +61,7 @@ async function llmBriefing(scenario: ScenarioId, operator: string, version: stri
   const parts = getScenario(scenario).parts.map((part) => ({ id: part.id, short: part.short, cue: part.cue, target: part.target, requiredRotation: part.requiredRotation, prerequisites: part.prerequisites }));
   const result = await completeJson("coach", coachSchema, [
     { role: "system", content: "You are the Coach agent for SpatialForge, a guided assembly trainer. Before a run you brief one technician in at most three short spoken sentences, based on their past mistakes and the approved instructions. Never change targets, rotations, or order; only give advice. Reply with one JSON object only." },
-    { role: "user", content: `Scenario parts: ${JSON.stringify(parts)}\nApproved instructions v${version}: ${JSON.stringify(guidance.steps)}\nOperator ${operator} profile: ${JSON.stringify({ runs: profile.runs, lastRun: (profile.lastRun ?? []).map((m) => mistakeAdvice(scenario, m).said), habits: (profile.habits ?? []).slice(0, 5).map((m) => `${mistakeAdvice(scenario, m).said} in ${m.runs} runs`), summary: profile.summary })}\n\nReply {"briefing": "...", "steps": {"<partId>": {"hint": "...", "preWarning": "..."}}}. Address their most relevant mistake by part name (e.g. "Last time you fitted the gland nut before the spool. Spool goes in first."), mention an approved pre-warning if relevant, and only include step overrides for steps they struggle with.` },
+    { role: "user", content: `Scenario parts: ${JSON.stringify(parts)}\nApproved instructions v${version}: ${JSON.stringify(guidance.steps)}\nOperator ${operator} profile: ${JSON.stringify({ runs: profile.runs, lastRun: (profile.lastRun ?? []).filter((m) => knownParts(scenario, m.stepId, m.partId, m.requiredPartId)).map((m) => mistakeAdvice(scenario, m).said), habits: (profile.habits ?? []).filter((m) => knownParts(scenario, m.stepId, m.partId, m.requiredPartId)).slice(0, 5).map((m) => `${mistakeAdvice(scenario, m).said} in ${m.runs} runs`), summary: profile.summary })}\n\nReply {"briefing": "...", "steps": {"<partId>": {"hint": "...", "preWarning": "..."}}}. Address their most relevant mistake by part name (e.g. "Last time you fitted the gland nut before the spool. Spool goes in first."), mention an approved pre-warning if relevant, and only include step overrides for steps they struggle with.` },
   ], { maxTokens: 2048, timeoutMs: 30000, temperature: 0.4 });
   if (!result.ok) return null;
   const personal = cleanGuidance(scenario, { steps: result.data.steps });

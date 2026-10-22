@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { getScenario, partFor, type PartDefinition, type PartId, type ScenarioId } from "@/lib/assembly";
 import { cleanGuidance, type Guidance, type StepGuidance } from "@/lib/guidance";
@@ -28,7 +29,7 @@ export type CriticOutcome = {
 };
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
-const shortOf = (scenario: ScenarioId, id: string) => partFor(scenario, id as PartId)?.short ?? id;
+const shortOf = (scenario: ScenarioId, id: string) => partFor(scenario, id as PartId)?.short ?? "part";
 
 export function qualifying(scenario: ScenarioId, rates: StepRate[], wrongOrder: WrongOrder[] = []): Candidate[] {
   return rates.filter((row) => PROPOSABLE_KINDS.has(row.kind) && row.rate >= THRESHOLD.minRate && row.runsWithError >= THRESHOLD.minRuns && partFor(scenario, row.stepId as PartId))
@@ -98,7 +99,7 @@ async function llmCritic(input: CriticInput, version: string, guidance: Guidance
   const qualified = candidates();
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM },
-    { role: "user", content: `Context: ${JSON.stringify(base)}\n\nTool results:\n${JSON.stringify(results)}\n\nPatterns that passed the threshold: ${JSON.stringify(qualified.map(({ part: _part, ...rest }) => ({ ...rest, meaning: evidenceLine(input.scenario, version, { ...rest, part: _part }) })))}\n\nGuidance for a step is shown while that step is the next one to do. For out_of_sequence_pick the step is the part that must be fitted first, and the preWarning must name the part operators grab too early and the part to fit first.\n\nTasks:\n1. operatorSummary: one or two sentences describing this operator's habits by part name, citing counts.\n2. proposal: ${qualified.length ? "pick ONE pattern from the qualifying list (use its exact stepId and kind) and write guidance for that step that directly prevents that mistake. The rationale must cite the evidence numbers (runs with the error, total runs, operators)." : "null, because no pattern passed the threshold."}\nReply {"operatorSummary": "...", "proposal": {"stepId": "...", "kind": "...", "rationale": "...", "guidance": {"preWarning": "...", "hint": "...", "voiceLine": "...", "substeps": ["..."]}} | null}` },
+    { role: "user", content: `Context: ${JSON.stringify(base)}\n\nTool results:\n${JSON.stringify(results)}\n\nPatterns that passed the threshold: ${JSON.stringify(qualified.map(({ part: _part, ...rest }) => ({ ...rest, meaning: evidenceLine(input.scenario, version, { ...rest, part: _part }) })))}\n\nGuidance for a step is shown while that step is the next one to do. For out_of_sequence_pick the step is the part that must be fitted first, and the preWarning must name the part operators grab too early and the part to fit first.\n\nTasks:\n1. operatorSummary: one or two sentences describing this operator's habits by part name, citing counts.\n2. proposal: ${qualified.length ? "pick ONE pattern from the qualifying list (use its exact stepId and kind) and write guidance for that step that directly prevents that mistake. The rationale must cite the evidence numbers (runs with the error, total runs, operators)." : "null, because no pattern without an existing proposal passed the threshold."}\nReply {"operatorSummary": "...", "proposal": {"stepId": "...", "kind": "...", "rationale": "...", "guidance": {"preWarning": "...", "hint": "...", "voiceLine": "...", "substeps": ["..."]}} | null}` },
   ];
   const decision = await completeJson("critic-decide", decisionSchema, messages, { maxTokens: 4096, timeoutMs: 60000 });
   if (!decision.ok) return { error: `decide: ${decision.error}` };
@@ -120,11 +121,15 @@ export async function runCritic(input: CriticInput): Promise<CriticOutcome> {
   const args: ToolArgs = { scenario: input.scenario, operator: input.operator, dagVersion: active.version, sessionId: input.sessionId };
   const results: ToolResults = {};
   const run = async (name: ToolName) => { if (outcome.toolsCalled.includes(name)) return; outcome.toolsCalled.push(name); (results as Record<string, unknown>)[name] = await runTool(ch, name, args); };
-  const candidates = () => qualifying(input.scenario, results.stepErrorRates ?? [], results.commonWrongOrder ?? []);
+  // Patterns that already have a proposal (any status) on this version are not offered again, so the next one gets a turn.
+  const proposed = new Set<string>();
+  const allQualified = () => qualifying(input.scenario, results.stepErrorRates ?? [], results.commonWrongOrder ?? []);
+  const candidates = () => allQualified().filter((item) => !proposed.has(`${item.stepId}/${item.kind}`));
   try {
+    if (db) for (const row of (await db.query("select step_id, kind from agent_proposals where scenario_id = $1 and based_on_version = $2", [input.scenario, active.version])).rows) proposed.add(`${row.step_id}/${row.kind}`);
     await Promise.all([run("operatorMistakes"), run("stepErrorRates")]); // baseline; the LLM may add the others
     // Out-of-order evidence (which part was grabbed early) is needed to describe that pattern at all.
-    if (candidates().some((item) => item.kind === "out_of_sequence_pick")) await run("commonWrongOrder");
+    if (allQualified().some((item) => item.kind === "out_of_sequence_pick")) await run("commonWrongOrder");
     let summary = "";
     let draft: ProposalDraft | undefined;
     if (llmConfigured() && await allowLlmCall(valkey(), "critic", 20)) {
@@ -136,8 +141,9 @@ export async function runCritic(input: CriticInput): Promise<CriticOutcome> {
     } else if (llmConfigured()) outcome.llmError = "LLM rate limit reached; used rules";
     const qualified = candidates();
     if (!draft && qualified.length) await run("hesitationByStep"); // extra context stored with rules evidence
-    outcome.candidates = qualified.map(({ part: _part, ...rest }) => rest);
+    outcome.candidates = allQualified().map(({ part: _part, ...rest }) => rest);
     if (!draft && qualified.length) draft = rulesProposal(input.scenario, active.version, qualified[0]);
+    if (!qualified.length && outcome.candidates.length) outcome.proposalSkipped = `every qualifying pattern already has a proposal on v${active.version}`;
     if (!summary) summary = profileSummary(input.scenario, results.operatorMistakes!);
     outcome.profile.summary = summary;
     if (!db) return { ...outcome, ok: true, error: "DATABASE_URL is not set; profile and proposal were not stored", proposal: draft ? { id: "", stepId: draft.stepId, kind: draft.kind, source: draft.source, rationale: draft.rationale } : null };
@@ -166,20 +172,40 @@ export async function runCritic(input: CriticInput): Promise<CriticOutcome> {
   }
 }
 
-// Pops queued jobs (LPUSH by PATCH /api/sessions, RPOP here, so oldest first). Failed jobs go to a side list.
+// Reliable queue: LPUSH by PATCH /api/sessions; here each job is RPOPLPUSHed (oldest first) into a processing list with a
+// short claim key and removed only after runCritic returns. A job whose worker died (claim expired) is requeued on the
+// next call. Failed jobs go to a side list. New jobs stop starting after a time budget so a request stays within maxDuration.
+const CLAIM_SECONDS = 300;
+const START_BUDGET_MS = 60000;
+const claimKey = (raw: string) => `${VALKEY_KEYS.criticClaim}:${createHash("sha1").update(raw).digest("hex")}`;
+
+async function requeueAbandoned(cache: NonNullable<ReturnType<typeof valkey>>) {
+  const processing = await cache.lrange(VALKEY_KEYS.criticProcessing, 0, -1);
+  for (const raw of processing) {
+    if (await cache.exists(claimKey(raw))) continue;
+    // Only the caller that removes the entry requeues it, so concurrent workers cannot duplicate a job.
+    if (await cache.lrem(VALKEY_KEYS.criticProcessing, 1, raw)) await cache.rpush(VALKEY_KEYS.criticQueue, raw);
+  }
+}
+
 export async function processCriticQueue(max = 1): Promise<{ results: CriticOutcome[]; queueEmpty: boolean; queueAvailable: boolean }> {
   const cache = valkey();
   if (!cache) return { results: [], queueEmpty: true, queueAvailable: false };
   const results: CriticOutcome[] = [];
-  for (let index = 0; index < max; index++) {
-    const raw = await cache.rpop(VALKEY_KEYS.criticQueue);
+  const startedAt = Date.now();
+  await requeueAbandoned(cache).catch((error) => console.error("critic: requeue failed", errorMessage(error)));
+  for (let index = 0; index < max && (index === 0 || Date.now() - startedAt < START_BUDGET_MS); index++) {
+    const raw = await cache.rpoplpush(VALKEY_KEYS.criticQueue, VALKEY_KEYS.criticProcessing);
     if (!raw) return { results, queueEmpty: true, queueAvailable: true };
+    await cache.set(claimKey(raw), "1", "EX", CLAIM_SECONDS).catch(() => undefined);
+    const done = () => cache.multi().lrem(VALKEY_KEYS.criticProcessing, 1, raw).del(claimKey(raw)).exec().catch(() => undefined);
     let job: CriticJob;
-    try { job = JSON.parse(raw) as CriticJob; } catch { continue; }
-    if (!isScenario(job.scenario) || !isOperator(job.operator)) continue;
+    try { job = JSON.parse(raw) as CriticJob; } catch { await done(); continue; }
+    if (!isScenario(job.scenario) || !isOperator(job.operator)) { await done(); continue; }
     const result = await runCritic({ scenario: job.scenario, operator: job.operator, sessionId: job.sessionId });
     results.push(result);
     if (!result.ok) await cache.lpush(VALKEY_KEYS.criticFailed, JSON.stringify({ ...job, error: result.error, failedAt: new Date().toISOString() })).catch(() => undefined);
+    await done();
   }
   return { results, queueEmpty: (await cache.llen(VALKEY_KEYS.criticQueue).catch(() => 0)) === 0, queueAvailable: true };
 }

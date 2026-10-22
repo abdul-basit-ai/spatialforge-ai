@@ -46,7 +46,7 @@ The workbench supports mouse and touch: select a part, rotate it if needed, and 
 
 **Admin review** (`/admin`). Enter the `ADMIN_TOKEN` (kept in sessionStorage; the server checks it). From there you can **Run critic**, read each proposal's rationale, evidence, and current-versus-proposed diff, and approve or reject it. Approving creates the next instruction version, makes it the scenario's single active version, and clears the Coach caches in Valkey. The **Version impact** chart shows, for each step, the share of runs with a correction under each version.
 
-**Coach** (`GET /api/agent/coach?operator=7&scenario=valve`). At session start the training page loads the active guidance and a short personal briefing, for example: "Last time you picked the Gland nut before the Spool. The Spool goes in first." It speaks and captions the briefing, uses the version's hints and pre-warnings in place of the built-in text, and stamps every event with that `dagVersion`. Briefings are cached in Valkey per operator, scenario, and version. Without data or an LLM it falls back to rules or the default text.
+**Coach** (`GET /api/agent/coach?operator=7&scenario=valve`). At session start the training page loads the active guidance (`GET /api/guidance`, no LLM, so the run's version never waits on the model) and then a short personal briefing, for example: "Last time you picked the Gland nut before the Spool. The Spool goes in first." It speaks and captions the briefing, uses the version's hints and pre-warnings in place of the built-in text, and stamps every event with that `dagVersion`. Briefings are cached in Valkey per operator, scenario, and version. Without data or an LLM it falls back to rules or the default text.
 
 ### Demo flow
 

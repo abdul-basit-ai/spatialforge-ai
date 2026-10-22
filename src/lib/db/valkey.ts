@@ -6,6 +6,8 @@ const globalRef = globalThis as typeof globalThis & { __sfValkey?: Valkey | null
 export const VALKEY_KEYS = {
   criticQueue: "sf:critic:jobs",
   criticFailed: "sf:critic:failed",
+  criticProcessing: "sf:critic:processing",
+  criticClaim: "sf:critic:claim",
   session: (id: string) => `sf:session:${id}`,
   activeGuidance: (scenario: string) => `sf:guidance:${scenario}`,
   coach: (scenario: string, version: string, operator: string) => `sf:coach:${scenario}:${version}:${operator}`,
@@ -18,14 +20,23 @@ export function withTimeout<T>(promise: Promise<T>, ms = 1500): Promise<T> {
   return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("valkey timeout")), ms))]);
 }
 
-// Fixed-window limiter for LLM calls. When Valkey is missing or down, the caller decides (agents fall back to rules).
+// Fixed-window limiter for LLM calls. Fails closed to a per-process window when Valkey is missing or down, so an
+// outage can never mean unlimited (billed) calls; callers fall back to rules when this returns false.
+const localWindows = new Map<string, number>();
+function allowLocal(scope: string, perMinute: number) {
+  const key = VALKEY_KEYS.llmRate(scope, Math.floor(Date.now() / 60000));
+  for (const old of localWindows.keys()) if (old !== key && old.startsWith(`sf:rl:llm:${scope}:`)) localWindows.delete(old);
+  const count = (localWindows.get(key) || 0) + 1;
+  localWindows.set(key, count);
+  return count <= perMinute;
+}
 export async function allowLlmCall(client: Valkey | null, scope: string, perMinute: number): Promise<boolean> {
-  if (!client) return true;
+  if (!client) return allowLocal(scope, perMinute);
   try {
     const key = VALKEY_KEYS.llmRate(scope, Math.floor(Date.now() / 60000));
     const [[, count]] = await withTimeout(client.multi().incr(key).expire(key, 120).exec() as Promise<Array<[Error | null, number]>>);
     return Number(count) <= perMinute;
-  } catch { return true; }
+  } catch { return allowLocal(scope, perMinute); }
 }
 export const LIVE_SESSION_TTL_SECONDS = 60 * 60 * 24;
 

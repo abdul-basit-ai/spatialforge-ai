@@ -86,11 +86,16 @@ export default function Home() {
   const warningSlot = parkedWarningSlot ?? (selectedPart && draggingRef.current && hoverTarget && hoverTarget !== selectedPart.target ? hoverTarget : null);
 
   useEffect(() => { hydrate(); }, [hydrate]);
-  // Load the Coach briefing for this operator and scenario in the background; refresh when the tab regains focus
-  // so an approval made on /admin applies to the next run. Failures leave the built-in text in place.
+  // Load the approved guidance (fast, no LLM) and then the personal Coach briefing (may wait on the LLM) in the
+  // background; refresh when the tab regains focus so an approval made on /admin applies to the next run. The
+  // guidance alone sets the run's version, so a slow or failed briefing cannot leave a run on the old version.
   useEffect(() => {
     let cancelled = false;
-    const load = () => fetch(`/api/agent/coach?operator=${encodeURIComponent(operator)}&scenario=${scenario}`, { signal: AbortSignal.timeout(8000) }).then((response) => response.ok ? response.json() as Promise<CoachBriefing> : null).then((body) => { if (!cancelled && body?.scenario === scenario && body.operator === operator) setCoach(body); }).catch(() => undefined);
+    const get = (path: string, ms: number) => fetch(`${path}?operator=${encodeURIComponent(operator)}&scenario=${scenario}`, { signal: AbortSignal.timeout(ms) }).then((response) => response.ok ? response.json() as Promise<CoachBriefing> : null).then((body) => !cancelled && body?.scenario === scenario && body.operator === operator ? body : null).catch(() => null);
+    const load = () => {
+      void get("/api/guidance", 8000).then((body) => { if (body) setCoach((prev) => prev && prev.scenario === scenario && prev.operator === operator && prev.version === body.version && prev.source !== "default" ? prev : body); });
+      return get("/api/agent/coach", 40000).then((body) => { if (body) setCoach(body); });
+    };
     void load();
     const onVisible = () => { if (document.visibilityState === "visible") void load(); };
     document.addEventListener("visibilitychange", onVisible);

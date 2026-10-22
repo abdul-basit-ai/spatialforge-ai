@@ -2,8 +2,8 @@ node_modules
 .next
 .git
 .claude
-.env
-.env*.local
+.env*
+!.env.example
 *.pem
 *.tsbuildinfo
 .vercel
