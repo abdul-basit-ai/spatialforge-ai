@@ -1,38 +1,140 @@
-# SpatialForge AI — Implementation Plan
+# SpatialForge AI — Hackathon Plan (Aiven + Data-Driven Agent)
 
-## Current implementation status
+The original pilot plan is kept at `docs/pilot-plan.md`. This plan covers the work needed to meet the hackathon brief: **agents that depend on data to deliver value**, **deployed on Aiven's Runtime**, using **Aiven managed data services**.
 
-The first guided assembly phase is implemented: the Precision Tray remains an unrestricted practice scenario, and the Small Valve Assembly adds accessible parts with prerequisite, target, orientation, voice, event, and passport checks. Physical-part inspection, room anchoring, PDF import, and automatic DAG revisions remain future phases.
+## Goal
 
-## Summary
+A technician trains on the guided valve assembly. Every grab, correction, and placement streams into Aiven. After each run, a **Critic agent** reads that operator's history and cross-operator patterns, then proposes better instructions. An admin approves them. The next run is coached differently, and the analytics show error rates dropping by instruction version.
 
-Build the four-shape assembly as the first usable release on desktop and iPhone 14. Operators choose a one-digit identity, complete virtual placements with hand gestures, and receive live voice guidance. Mistakes persist across sessions. A separate admin reviews proposed instruction changes and missing-part alerts. Add guided PDF import in the next milestone.
+Demo line: *"Run 1 the operator fits the gland nut before the spool. The agent sees 6 of 10 operators make the same mistake, proposes a pre-warning, the admin approves it, and run 2 starts with that warning. The error rate for that step falls in the version chart."*
 
-## Implementation
+## Ground rules (unchanged from the pilot)
 
-- **Spatial workbench:** Use Next.js, TypeScript, Three.js, and Vercel. Desktop shows a 3D workbench; mobile uses rear-camera AR with the 8th Wall SLAM binary to anchor the tray without extra equipment. Its open-source framework lacks world tracking, so include the binary's required attribution and license notice.
-- **Four-shape workflow:** Place Cylinder Core, Hexagonal Valve Block, Cube Module, and Toroid Seal Ring into slots A1–A4. Use visible orientation cues on the hexagonal block and cube. Map the tracked pinch position through the camera onto the tray plane for grab, rotation, wrong-slot interception, and drop; use thumbs-up or open-palm hold for confirmation. Provide touch controls when tracking is lost.
-- **Verification and voice:** Make virtual slot and orientation checks deterministic. Sample the shared camera feed for MediaPipe; send 256 × 256 crops to OpenRouter only for optional inspection, never as a frame-by-frame dependency. Pin requests to `z-ai/glm-5.3-flash` with `allow_fallbacks: false` and price sorting. Stream ElevenLabs Flash v2.5 guidance, with captions and voice-command fallback. Treat 60 FPS rendering and sub-500 ms responses as measured targets, not certification guarantees.
-- **Memory and review:** Keep current hesitation and mistakes in Zustand; save events, operator digit, sessions, and DAG versions in Supabase. After a session, the critic proposes shields, simpler substeps, or revised prompts. An authenticated admin previews and approves each version before it becomes active. Approved missing-SKU events go to a demo n8n webhook with no purchase action. Show error and completion trends by DAG version in Lightdash.
-- **Completion record:** Hash a canonical record of the selected scenario's verified placements, target IDs, rotations, DAG version, timestamp, and entered digit with SHA-256; store it as an append-only demo passport. Label the digit as self-declared identity. Physical-part inspection remains outside this release.
-- **Next milestone:** Use `unpdf` and the pinned model to propose steps, parts, and parametric shapes from an uploaded PDF. An admin corrects the proposed scene and approves publication; PDFs that lack enough assembly detail remain drafts.
+- Placement correctness stays deterministic (`spatial-engine.ts`, `assembly.ts`). The agent never decides whether a part was placed correctly.
+- The agent can only change *guidance* (hints, warnings, substep prompts, voice lines). It cannot change targets, rotations, or prerequisites.
+- No proposal goes live without admin approval.
+- The app must still work with no keys set (local storage + browser speech), so the demo survives network failures.
 
-## Acceptance scenarios
+---
 
-- On desktop and iPhone 14, an operator can finish all four placements; wrong slots and keyed orientation errors block completion and trigger immediate visual and voice guidance.
-- A returning digit sees coaching informed by its saved mistakes. An approved DAG revision changes the next session; an unapproved proposal does not.
-- Only the admin can publish a DAG revision or send the approved demo webhook. Completion produces a reproducible hash tied to the recorded evidence.
-- The iPhone session can finish with touch controls if hand tracking fails. Camera, microphone, network, or AI failure gives a clear recovery path without falsely completing a step.
-- In the next milestone, a reviewed PDF draft can become a playable scene; an incomplete extraction cannot publish automatically.
+## Phase 1 — Move the data layer to Aiven
 
-## Assumptions
+Replace Supabase with three Aiven services, each with a clear job:
 
-- This is a small-team demo with at most ten self-declared operator digits and one authenticated admin.
-- “VR workbench” means an interactive desktop 3D digital twin in the first release; headset immersion is a later extension.
-- iPhone AR uses one hand to hold the phone and the other within rear-camera view for gestures.
+| Service | Holds | Why this one |
+|---|---|---|
+| **Aiven PostgreSQL** | sessions, operators, completion passports, instruction versions (`dag_versions`), agent proposals, operator profiles | Relational records that need constraints and an approval workflow |
+| **Aiven ClickHouse** | every `spatial_event` (append-only) | Fast aggregate queries across all runs; this is what the agent queries |
+| **Aiven Valkey** | live session state, Critic job queue, per-operator coaching cache, rate limits | Low-latency state, and a queue so the Critic runs after a session without blocking the request |
 
-## References
+### Tasks
 
-- [8th Wall engine distributions](https://8thwall.org/docs/open-source)
-- [8th Wall camera pipeline](https://8thwall.org/docs/api/engine/xr8/addcamerapipelinemodule)
-- [ElevenLabs latency guidance](https://elevenlabs.io/docs/api-reference/reducing-latency)
+1. Provision PostgreSQL, ClickHouse, and Valkey in one Aiven project and region. Record connection URIs in `.env.local` only.
+2. Add dependencies: `pg`, `@clickhouse/client`, `iovalkey` (or `ioredis`). Remove `@supabase/supabase-js` once all routes are moved.
+3. Create `src/lib/db/`:
+   - `postgres.ts`: a shared `pg` pool using Aiven's CA certificate (`sslmode=verify-full`).
+   - `clickhouse.ts`: a shared ClickHouse client.
+   - `valkey.ts`: a shared Valkey client.
+   - Each returns `null` when its env var is missing, matching the current "persisted: false" fallback.
+4. Rewrite the schema as `db/postgres.sql` and `db/clickhouse.sql`:
+   - Drop the Supabase-only `auth.users` reference and RLS policies. Admin access becomes a server-checked `ADMIN_TOKEN` (enough for the demo; note it as a limitation).
+   - New PostgreSQL tables: `operator_profiles` (operator_code, scenario_id, mistake summary JSON, updated_at) and `agent_proposals` (id, scenario_id, based_on_version, rationale, evidence query results, proposed guidance JSON, status, reviewed_at).
+   - `dag_versions` gains `scenario_id`, `guidance jsonb`, and an `is_active` flag (one active per scenario).
+   - ClickHouse `spatial_events`: `MergeTree` ordered by `(scenario_id, operator_code, session_id, sequence)`, with a `dag_version` column so error rates can be grouped by instruction version.
+5. Add `scripts/migrate.ts` to apply both schema files, and `scripts/seed.ts` to generate about 30 simulated runs across 10 operators with realistic mistake patterns. Without seeding, the agent has nothing to learn from during a live demo.
+6. Port the routes:
+   - `/api/events` → batch insert into ClickHouse and update the live session in Valkey.
+   - `/api/sessions` → PostgreSQL. Add `PATCH` to mark a session complete, which pushes a Critic job to Valkey.
+   - `/api/passports` → PostgreSQL. Keep the existing hash and manifest validation as-is.
+7. Add `/api/health`, which reports the reachability of each service. Use it for deployment checks and the admin page.
+
+**Done when:** a run on localhost writes events to ClickHouse and sessions and passports to PostgreSQL, the admin page lists cloud sessions from PostgreSQL, and the app still works with every Aiven variable removed.
+
+---
+
+## Phase 2 — Deploy on Aiven Runtime
+
+1. Set `output: "standalone"` in `next.config` and add a `Dockerfile` (Node 22, multi-stage build).
+2. Follow Aiven's current Runtime documentation for the deployment method, build settings, and secrets. Verify these against the docs at deploy time rather than assuming them.
+3. Put every secret in the Runtime's secret store. None go in the repo.
+4. Confirm the deployed URL is HTTPS, so iPhone camera access works without the Cloudflare tunnel.
+5. Run a smoke test on the deployed URL: `/api/health` is green, a desktop run completes, an iPhone Camera AR run completes, and the events show up in ClickHouse.
+
+**Done when:** a public HTTPS URL on Aiven runs the full flow against Aiven data services.
+
+---
+
+## Phase 3 — The data-driven agent loop
+
+Two agents and one human gate. Both agents use the existing OpenRouter key and pinned model through a shared `src/lib/agent/llm.ts`. Their outputs are JSON validated with `zod`; invalid output is discarded, never applied.
+
+### 3a. Critic agent (after each run, from the Valkey queue)
+
+- **Trigger:** session marked complete → job pushed to Valkey → processed by a worker (`/api/agent/critic`, invoked from the queue or by the admin's "Run critic" button for the demo).
+- **Data tools:** a fixed set of parameterized ClickHouse queries. The model chooses which tools to call but never writes SQL.
+  - `operatorMistakes(operator, scenario)`: this operator's corrections by step and kind.
+  - `stepErrorRates(scenario, dagVersion)`: corrections per step, per run, for every operator.
+  - `commonWrongOrder(scenario)`: the most frequent out-of-order attempts.
+  - `hesitationByStep(scenario)`: median time from grab to correct placement.
+  - `versionComparison(scenario)`: error rate per instruction version.
+- **Output:**
+  1. Updates `operator_profiles` (long-term memory for that operator).
+  2. When a cross-operator pattern passes a threshold (for example, at least 30% of runs and at least 5 runs), writes an `agent_proposals` row. The row includes the evidence numbers it used and a guidance change limited to the allowed fields: `preWarning`, `hint`, `voiceLine`, `substeps`.
+
+### 3b. Coach agent (at session start)
+
+- Reads the active `dag_versions.guidance` for the scenario plus the operator's `operator_profiles`.
+- Produces a short personalised briefing and per-step hint overrides, for example: *"Last time you fitted the gland nut before the spool. Spool goes in first."*
+- Cached in Valkey per operator + version, so repeat starts are instant and cost nothing.
+- Falls back to the default guidance when the LLM or data is unavailable.
+
+### 3c. Admin review
+
+- The `/admin` page gets a **Proposals** section showing the rationale, the evidence numbers, and a diff of current versus proposed guidance, with Approve and Reject buttons.
+- Approving creates a new `dag_versions` row (for example 1.0 → 1.1), marks it active, and invalidates Coach caches in Valkey.
+- A **Version impact** chart shows error rate per step for each version, queried from ClickHouse. This is the visible proof that the system improves.
+
+### 3d. Wiring into the training UI
+
+- `page.tsx` loads the active guidance and the Coach briefing when a session starts. It speaks and captions the briefing and uses step hints and pre-warnings in place of hard-coded text, falling back to the current text.
+- Every event carries `dagVersion` so impact can be measured.
+
+**Done when:** after seeding, completing a valve run with a known mistake produces a proposal citing real numbers. Approving it changes the next session's briefing and warnings. The version chart shows separate bars for 1.0 and 1.1.
+
+---
+
+## Phase 4 — Clean up unused AI surface
+
+- Remove `/api/inspect` and the `OPENROUTER` image-inspection path from the README, or move them into `docs/` as future work. Judges should only see features that work. Physical-part inspection stays deferred.
+- Update `README.md`: architecture diagram (browser → Aiven Runtime → PostgreSQL / ClickHouse / Valkey → agents), setup for Aiven, and how to run the migrate and seed scripts.
+- Update `.env.example` with the new variable names: `DATABASE_URL`, `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `VALKEY_URL`, `AIVEN_CA_CERT`, `ADMIN_TOKEN`, `OPENROUTER_API_KEY`, `ELEVENLABS_*`. Remove the Supabase, n8n, and 8th Wall variables that are no longer used.
+
+---
+
+## Deferred (later)
+
+- **Route to first users:** target customer, pilot offer, success metrics.
+- **Data-centred demo story and pitch:** scripted before/after run with the version-impact chart.
+- PDF-to-spatial compiler, room-anchored AR, physical-part inspection, n8n inventory webhook, open-palm whole-object rotation gesture.
+
+---
+
+## Order of work
+
+1. Phase 1, steps 1–5 (services, clients, schema, seed) — foundation for everything else
+2. Phase 1, steps 6–7 (route ports, health)
+3. Phase 2 (deploy early, so deployment problems surface while there is time)
+4. Phase 3a Critic → 3c Admin review → 3b Coach → 3d UI wiring
+5. Phase 4 cleanup and README
+6. Redeploy and run the full smoke test
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| Aiven Runtime build/deploy differs from expectations | Deploy a minimal build in step 3 of the order, before the agent work |
+| Too little real data for the Critic to find patterns | The seed script generates realistic multi-operator history |
+| LLM returns malformed or out-of-scope changes | zod validation plus an allow-list of guidance fields; failures are logged and skipped |
+| LLM latency at session start | Valkey cache plus a default-guidance fallback; the briefing loads asynchronously |
+| Network or service failure during the live demo | Existing local-storage and browser-speech fallbacks stay in place |
+| Simple admin token is weak | Acceptable for the demo; document it as a known limitation |
