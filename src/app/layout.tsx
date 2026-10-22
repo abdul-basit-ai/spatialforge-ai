@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
+import { ForgeNav } from "@/components/forge/trainer/ForgeNav";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "SpatialForge AI",
-  description: "Gesture guided spatial assembly workbench",
+  description: "Assembly training and live assist for mechanical and mechatronic hardware",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" suppressHydrationWarning><body suppressHydrationWarning>{children}</body></html>;
+  return <html lang="en" suppressHydrationWarning><body suppressHydrationWarning><ForgeNav />{children}</body></html>;
 }

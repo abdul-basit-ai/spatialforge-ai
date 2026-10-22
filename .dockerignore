@@ -1,0 +1,15 @@
+node_modules
+.next
+.git
+.claude
+.env*
+!.env.example
+*.pem
+*.tsbuildinfo
+.vercel
+.edge-preview
+.chrome-preview
+docs
+*.png
+Dockerfile
+docker-compose.yml

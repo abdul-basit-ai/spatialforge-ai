@@ -1,0 +1,61 @@
+# Deploying SpatialForge AI
+
+The app builds to a self-contained Next.js server (`output: "standalone"`) inside a multi-stage Node 22 image (`Dockerfile`). These are generic container steps. **Aiven Runtime specifics (build method, port, secret store, health check settings) have not been verified here; confirm each step against Aiven's current Runtime documentation before deploying.**
+
+## 1. Data services
+
+1. Create Aiven PostgreSQL, ClickHouse, and Valkey services in one project and region.
+2. Download the project CA certificate (`ca.pem`).
+3. From a machine with the repo, put the service URIs in `.env.local` (never commit it) and run:
+   ```sh
+   npm ci
+   npm run db:migrate   # applies db/postgres.sql and db/clickhouse.sql
+   npm run db:seed      # optional: 30 simulated runs so the Critic has history
+   ```
+
+## 2. Environment / secrets
+
+Set these in the platform's secret store, not in the image or repo:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | PostgreSQL service URI |
+| `CLICKHOUSE_URL` | ClickHouse **HTTPS** endpoint, e.g. `https://host:port` |
+| `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` | ClickHouse credentials |
+| `CLICKHOUSE_DATABASE` | optional, defaults to `default` |
+| `VALKEY_URL` | Valkey URI (`rediss://...`) |
+| `AIVEN_CA_CERT` | contents of `ca.pem` (literal `\n` is accepted) or a path to it inside the container |
+| `ADMIN_TOKEN` | shared secret for `/admin` actions and `POST /api/agent/critic`; admin actions are disabled (503) when unset |
+| `OPENROUTER_API_KEY` | optional; enables the LLM Critic and Coach (pinned `z-ai/glm-5.3-flash`). Unset: deterministic rules |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | optional neural voice |
+
+With `AIVEN_CA_CERT` set, PostgreSQL uses verified TLS (equivalent to `sslmode=verify-full`; any `sslmode` in the URI is replaced), and ClickHouse (https) and Valkey (rediss) trust the Aiven CA in addition to public roots. Any unset service falls back to `persisted: false`.
+
+## 3. Build and run the image
+
+```sh
+docker build -t spatialforge-ai .
+# Keep the env file OUTSIDE the repo (the build context): Next.js standalone output copies any .env/.env.production
+# it finds into the image. `.dockerignore` and `.gitignore` exclude every `.env*` file except `.env.example` as a backstop.
+docker run --rm -p 3000:3000 --env-file ../spatialforge.env spatialforge-ai
+```
+
+On a managed platform, use its secret store instead of an env file.
+
+The container listens on `PORT` (default 3000) on `0.0.0.0` and runs as a non-root user. Its built-in `HEALTHCHECK` calls `GET /api/health`, which returns 200 when every configured service is reachable and 503 when one is down.
+
+## 4. Critic worker
+
+Completed runs queue jobs on the Valkey list `sf:critic:jobs`. They are processed when an admin presses **Run critic** on `/admin`, or by any scheduler that calls:
+
+```sh
+curl -X POST https://<app>/api/agent/critic -H "x-admin-token: $ADMIN_TOKEN" -H "content-type: application/json" -d '{"max":10}'
+```
+
+Jobs are moved to `sf:critic:processing` while they run and removed only when the Critic finishes; a job whose worker died is put back on the queue by the next call (after its 5-minute claim expires). Failed jobs are kept on `sf:critic:failed`. The route allows up to 180 s, because the LLM is a reasoning model, and stops starting new jobs after 60 s, so one call may process fewer than `max` jobs; call again while `queueEmpty` is false.
+
+## 5. Smoke test the deployed URL
+
+- The URL must be HTTPS (iPhone camera access requires a secure context).
+- `GET /api/health` returns `"ok": true` with each service `"ok"`.
+- Complete a desktop run and an iPhone Camera AR run, then check rows in `assembly_sessions` / `completion_passports` (PostgreSQL), `spatial_events` (ClickHouse), and a job on the `sf:critic:jobs` list (Valkey).

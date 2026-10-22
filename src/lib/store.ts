@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getScenario, partFor, type PartId, type PlacementMethod, type ScenarioId } from "@/lib/assembly";
+import { telemetrySession, telemetryStamp } from "@/lib/telemetry";
 
 export type Placement = { scenario: ScenarioId; partId: PartId; targetId: PartId; rotation: number; method: PlacementMethod; at: string };
 export type ErrorEvent = { scenario: ScenarioId; partId: PartId; attemptedTarget?: PartId; kind: "wrong-target" | "orientation" | "prerequisite" | "tracking-lost"; prerequisite?: PartId; at: string };
@@ -24,6 +25,8 @@ const keyFor = (operator: string, scenario: ScenarioId) => `spatialforge:run:${o
 function send(path: string, body: unknown) {
   fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => undefined);
 }
+
+const sendEvent = (event: Record<string, unknown>) => send("/api/events", { ...event, ...telemetryStamp() });
 
 function readRun(operator: string, scenario: ScenarioId) {
   if (typeof window === "undefined") return { placements: [], errors: [], passport: null };
@@ -85,14 +88,15 @@ export const useAssemblyStore = create<State>((set, get) => ({
     const placements = [...state.placements, placement];
     set({ placements, passport: null });
     persist(state.operator, state.scenario, placements, state.errors, null);
-    send("/api/events", { type: "placement_verified", scenario: state.scenario, operator: state.operator, partId, targetId: part.target, rotation, method, at: placement.at });
+    sendEvent({ type: "placement_verified", scenario: state.scenario, operator: state.operator, partId, targetId: part.target, rotation, method, at: placement.at });
     if (placements.length !== getScenario(state.scenario).parts.length) return;
-    const evidence = { operator: state.operator, scenario: state.scenario, dagVersion: "1.0", placements, completedAt: new Date().toISOString(), identity: "self-declared" };
+    const { sessionId, dagVersion } = telemetrySession();
+    const evidence = { operator: state.operator, scenario: state.scenario, dagVersion, placements, completedAt: new Date().toISOString(), identity: "self-declared" };
     crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(evidence))).then((digest) => {
       const passport = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
       set({ passport });
       persist(state.operator, state.scenario, placements, get().errors, passport);
-      send("/api/passports", { operator: state.operator, scenario: state.scenario, dagVersion: "1.0", sha256: passport, evidence });
+      send("/api/passports", { operator: state.operator, scenario: state.scenario, dagVersion, sessionId, sha256: passport, evidence });
     }).catch(() => undefined);
   },
   unplace: (partId) => {
@@ -102,7 +106,7 @@ export const useAssemblyStore = create<State>((set, get) => ({
     const placements = state.placements.filter((item) => item.partId !== partId);
     set({ placements, passport: null });
     persist(state.operator, state.scenario, placements, state.errors, null);
-    send("/api/events", { type: "placement_removed", scenario: state.scenario, operator: state.operator, partId, targetId: placement.targetId, rotation: placement.rotation, at: new Date().toISOString() });
+    sendEvent({ type: "placement_removed", scenario: state.scenario, operator: state.operator, partId, targetId: placement.targetId, rotation: placement.rotation, at: new Date().toISOString() });
   },
   recordError: (partId, kind, attemptedTarget, prerequisite) => {
     const state = get();
@@ -110,7 +114,7 @@ export const useAssemblyStore = create<State>((set, get) => ({
     const errors = [...state.errors, event];
     set({ errors });
     persist(state.operator, state.scenario, state.placements, errors, state.passport);
-    send("/api/events", { type: kind, scenario: state.scenario, operator: state.operator, partId, attemptedTarget, prerequisite, at: event.at });
+    sendEvent({ type: kind, scenario: state.scenario, operator: state.operator, partId, attemptedTarget, prerequisite, at: event.at });
   },
   reset: () => {
     const state = get();

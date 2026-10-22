@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getScenario, normalizeRotation, type ScenarioId } from "@/lib/assembly";
-import { createClient } from "@supabase/supabase-js";
+import { isUuid, postgres } from "@/lib/db/postgres";
+import { errorMessage } from "@/lib/db/tls";
+import { DEFAULT_DAG_VERSION } from "@/lib/spatial-engine";
 
 export async function POST(request: Request) {
   const passport = await request.json().catch(() => null);
@@ -18,12 +20,12 @@ export async function POST(request: Request) {
     if (part.prerequisites.some((requirement) => !seen.has(requirement))) return NextResponse.json({ error: "Prerequisite order is incomplete" }, { status: 400 });
     seen.add(part.id);
   }
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (url && key) {
-    const supabase = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-    const { error } = await supabase.from("completion_passports").insert({ operator_code: passport.operator, dag_version: passport.dagVersion ?? "1.0", evidence: passport.evidence, sha256: passport.sha256 });
-    if (error) return NextResponse.json({ error: error.message }, { status: 502 });
+  const db = postgres();
+  if (db) {
+    const sessionId = isUuid(passport.sessionId) ? passport.sessionId : null;
+    const dagVersion = typeof passport.dagVersion === "string" ? passport.dagVersion.slice(0, 32) : DEFAULT_DAG_VERSION;
+    try { await db.query("insert into completion_passports (operator_code, scenario_id, session_id, dag_version, evidence, sha256) values ($1,$2,$3,$4,$5,$6) on conflict (sha256) do nothing", [String(passport.operator ?? passport.evidence.operator ?? ""), scenarioId, sessionId, dagVersion, passport.evidence, passport.sha256]); }
+    catch (error) { console.error("passports: insert failed", errorMessage(error)); return NextResponse.json({ error: "Passport store unavailable" }, { status: 502 }); }
   }
-  return NextResponse.json({ ok: true, persisted: Boolean(url && key), sha256: passport.sha256 });
+  return NextResponse.json({ ok: true, persisted: Boolean(db), sha256: passport.sha256 });
 }
