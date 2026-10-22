@@ -41,6 +41,8 @@ export async function exportAssemblyGlb(assembly: ImportedAssembly): Promise<Arr
   for (const holder of assembly.group.children) {
     const copy = holder.clone(true); // shares geometry and materials
     copy.position.set(0, 0, 0); copy.quaternion.identity(); copy.scale.set(1, 1, 1);
+    // The preview tints emissive for hover/selection; never bake that highlight into the asset.
+    copy.traverse((object) => { const mesh = object as THREE.Mesh; if (mesh.isMesh && (mesh.material as THREE.MeshStandardMaterial).emissive) { mesh.material = (mesh.material as THREE.MeshStandardMaterial).clone(); (mesh.material as THREE.MeshStandardMaterial).emissive.set(0); } });
     root.add(copy);
   }
   const result = await new GLTFExporter().parseAsync(root, { binary: true, onlyVisible: false });

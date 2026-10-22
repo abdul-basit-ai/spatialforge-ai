@@ -42,7 +42,7 @@ export async function POST(request: Request) {
   try {
     const assets = [];
     for (const item of checked) {
-      const id = await saveAsset({ name: item.name, mime: item.mime, bytes: item.bytes, scenarioId, meta: { ...meta, kind: item.kind, size: item.bytes.length, uploadedAt: new Date().toISOString() } });
+      const id = await saveAsset({ name: item.name, mime: item.mime, bytes: item.bytes, scenarioId, meta: { ...meta, ...(typeof meta.kind === "string" && meta.kind !== item.kind ? { role: meta.kind } : {}), kind: item.kind, size: item.bytes.length, uploadedAt: new Date().toISOString() } });
       assets.push({ id, name: item.name, mime: item.mime, kind: item.kind, size: item.bytes.length, url: `/api/forge/assets/${id}` });
     }
     return NextResponse.json({ ...assets[0], assets }, { status: 201 });
