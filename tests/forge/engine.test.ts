@@ -50,7 +50,7 @@ const rng = (seed: number) => () => { seed = (seed * 1664525 + 1013904223) % 429
 
 describe("built-in scenarios", () => {
   test("exist and cover the three demos", () => {
-    assert.deepEqual(BUILTIN_SCENARIOS.map((s) => s.id).sort(), ["linear-actuator", "planetary-gearbox", "pneumatic-valve"]);
+    assert.deepEqual(BUILTIN_SCENARIOS.map((s) => s.id).sort(), ["centrifugal-pump", "linear-actuator", "planetary-gearbox", "pneumatic-cylinder", "pneumatic-valve"]);
     const actuator = scenario("linear-actuator");
     assert.ok(actuator.parts.length >= 14 && actuator.parts.length <= 20, `actuator has ${actuator.parts.length} parts`);
     for (const kind of ["place", "fasten", "connect", "route", "adjust", "inspect", "tool"]) assert.ok(actuator.steps.some((step) => step.kind === kind), `actuator lacks a ${kind} step`);
