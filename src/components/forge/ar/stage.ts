@@ -59,7 +59,7 @@ export class ARStage {
   private arrows = new Map<string, THREE.Group>();
   private view: StageView = { run: null, ghostIds: [], arrowIds: [], outline: false, locked: false };
   private status: StageStatus = { xr: false, placed: false, surface: false, snapId: null, dragging: null, selectedId: null };
-  private tableY = 0; private asmRadius = 0.1; private scale = 1;
+  private tableY = 0; private asmRadius = 0.1; private asmHeight = 0.1; private scale = 1;
   private orbit = { yaw: 0, pitch: 0.82, zoom: 1 };
   private fitRadius = 0.2;
   private drag: { id: string | null; source: XRInputSource | null; pointerId: number | null; moved: number; start: THREE.Vector3 | null; mode: "part" | "orbit" | "anchor"; lastX: number; lastY: number } | null = null;
@@ -151,28 +151,43 @@ export class ARStage {
     if (this.disposed) return;
     this.tableY = Number.isFinite(box.min.y) ? box.min.y : 0;
     const size = box.isEmpty() ? new THREE.Vector3(0.2, 0.2, 0.2) : box.getSize(new THREE.Vector3());
-    this.asmRadius = Math.max(0.04, Math.hypot(size.x, size.z) / 2);
+    this.asmRadius = Math.max(0.04, Math.hypot(size.x, size.z) / 2); this.asmHeight = Math.max(0.01, size.y);
     this.assembly.position.y = -this.tableY;
     // Staging: unplaced parts rest on the table in an arc in front of the assembly (toward the user), ordered by step.
     const loose = this.scenario.parts.filter((p) => !this.scenario.baseParts.includes(p.id)).sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99));
-    const perRow = 7; let maxR = 0;
-    loose.forEach((part, i) => {
-      const rec = this.recs.get(part.id)!; const row = Math.floor(i / perRow), col = i % perRow, inRow = Math.min(perRow, loose.length - row * perRow);
-      const R = this.asmRadius * 1.25 + 0.05 + row * Math.max(0.05, rec.radius * 2.4);
-      const angle = inRow === 1 ? 0 : -1.95 + (3.9 * col) / (inRow - 1) + (row % 2 ? 0.2 : 0);
-      const quat = new THREE.Quaternion(...part.assembled.quaternion);
+    // Rows are packed by each part's footprint, so small fasteners sit close and the table stays compact.
+    const items = loose.map((part, i) => {
+      const rec = this.recs.get(part.id)!; const quat = new THREE.Quaternion(...part.assembled.quaternion);
       // Keyed parts start a quarter turn off on alternate parts, so orientation is part of the lesson.
       const sym = part.mate.symmetryDeg ?? 360;
       if (this.mode === "train" && part.mate.axis && i % 2 === 1 && sym >= 180) quat.premultiply(new THREE.Quaternion().setFromAxisAngle(v3(part.mate.axis).normalize(), Math.PI / 2));
       rec.solid.position.set(0, 0, 0); rec.solid.quaternion.copy(quat); rec.solid.updateMatrixWorld(true);
       const b = new THREE.Box3().setFromObject(rec.solid);
-      const position: [number, number, number] = [Math.sin(angle) * R - (b.min.x + b.max.x) / 2, this.tableY - b.min.y + 0.001, Math.cos(angle) * R - (b.min.z + b.max.z) / 2];
-      rec.staging = rec.rest = { position, quaternion: [quat.x, quat.y, quat.z, quat.w] };
-      maxR = Math.max(maxR, R + rec.radius);
+      return { rec, quat, b, foot: Math.max(0.006, Math.hypot(b.max.x - b.min.x, b.max.z - b.min.z) / 2) };
     });
+    const ARC = 3.9, MARGIN = 0.012, gap = (foot: number) => Math.max(0.026, foot * 2 + 0.012);
+    let inner = this.asmRadius, maxR = this.asmRadius, next = 0;
+    while (next < items.length) {
+      const row: typeof items = []; let rowFoot = 0, span = 0;
+      while (next < items.length) {
+        const item = items[next], foot = Math.max(rowFoot, item.foot), g = gap(item.foot);
+        if (row.length && (span + g) / (inner + MARGIN + foot) > ARC) break;
+        row.push(item); rowFoot = foot; span += g; next++;
+      }
+      const R = inner + MARGIN + rowFoot, spread = Math.min(1.6, (ARC * R) / span);
+      let acc = (-span * spread) / 2;
+      for (const { rec, quat, b, foot } of row) {
+        const g = gap(foot) * spread, angle = (acc + g / 2) / R; acc += g;
+        const position: [number, number, number] = [Math.sin(angle) * R - (b.min.x + b.max.x) / 2, this.tableY - b.min.y + 0.001, Math.cos(angle) * R - (b.min.z + b.max.z) / 2];
+        rec.staging = rec.rest = { position, quaternion: [quat.x, quat.y, quat.z, quat.w] };
+      }
+      inner = R + rowFoot; maxR = inner;
+    }
     const shadowSize = this.asmRadius * 2.8; this.shadow.scale.set(shadowSize, 1, shadowSize);
     const matR = Math.max(this.asmRadius * 1.15, maxR + 0.015); this.mat.scale.set(matR, 1, matR);
-    this.fitRadius = this.mode === "assist" ? this.asmRadius * 1.5 : matR * 0.9;
+    // Fit the whole bounding sphere too, so tall stacks (and the insertion arrow above them) stay in view.
+    const half3d = size.length() / 2;
+    this.fitRadius = this.mode === "assist" ? Math.max(this.asmRadius * 1.5, half3d * 1.3) : Math.max(matR * 0.9, half3d * 1.1);
     this.applyView(true);
   }
 
@@ -181,12 +196,36 @@ export class ARStage {
   private resize = () => {
     if (this.renderer.xr.isPresenting) return;
     const w = Math.max(1, this.host.clientWidth), h = Math.max(1, this.host.clientHeight);
-    this.renderer.setSize(w, h); this.camera.aspect = w / h;
-    // Portrait phones: the bottom sheet covers the lower screen, so shift the optical centre up.
-    const k = h > w ? Math.round(h * 0.16) : 0;
-    if (k) this.camera.setViewOffset(w, h + 2 * k, 0, 2 * k, w, h); else this.camera.clearViewOffset();
-    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h); this.project();
   };
+
+  // Screen-locked view: the overlay (top bar, side rail, bottom sheet) covers part of the screen, so the optical centre
+  // is shifted into the free region (an off-centre view window keeps pixels square) and the fit uses the free size.
+  private safe = { top: 0, right: 0, bottom: 0, left: 0 };
+  private safeTarget = { ...this.safe };
+  private free = { w: 1, h: 1, H: 1 };
+  setSafeArea(insets: { top: number; right: number; bottom: number; left: number }, immediate = false) {
+    this.safeTarget = { ...insets }; if (immediate) { this.safe = { ...insets }; this.project(); }
+  }
+
+  private project() {
+    const w = Math.max(1, this.host.clientWidth), h = Math.max(1, this.host.clientHeight), s = this.safe;
+    const sx = (s.left - s.right) / 2, sy = (s.top - s.bottom) / 2;
+    const W = w + 2 * Math.abs(sx), H = h + 2 * Math.abs(sy);
+    this.camera.aspect = W / H;
+    if (sx || sy) this.camera.setViewOffset(W, H, Math.abs(sx) - sx, Math.abs(sy) - sy, w, h); else this.camera.clearViewOffset();
+    this.camera.updateProjectionMatrix();
+    this.free = { w: Math.max(80, w - s.left - s.right), h: Math.max(80, h - s.top - s.bottom), H };
+  }
+
+  private easeSafe() {
+    let moved = false;
+    for (const k of ["top", "right", "bottom", "left"] as const) {
+      const d = this.safeTarget[k] - this.safe[k];
+      if (Math.abs(d) > 0.5) { this.safe[k] += d * 0.18; moved = true; } else if (d) { this.safe[k] = this.safeTarget[k]; moved = true; }
+    }
+    if (moved) this.project();
+  }
 
   // ---------- view state from React ----------
   setView(view: Partial<StageView>) {
@@ -462,7 +501,7 @@ export class ARStage {
         if (url || performance.now() - this.capture.at > 1500) { this.capture.resolve(url); this.capture = null; }
       }
     } else {
-      this.applyCamera();
+      this.easeSafe(); this.applyCamera();
     }
     const now = performance.now(), pulse = 0.5 + 0.5 * Math.sin(time / 260);
     for (const [id, rec] of this.recs) {
@@ -483,7 +522,7 @@ export class ARStage {
     }
     for (const arrow of this.arrows.values()) {
       const L = arrow.userData.length as number, axis = arrow.userData.axis as THREE.Vector3, seat = arrow.userData.seat as THREE.Vector3;
-      const t = (time / 1100) % 1; const back = L * (2.1 - t * 1.0);
+      const t = (time / 1100) % 1; const back = L * (1.7 - t * 0.9);
       arrow.position.copy(seat).addScaledVector(axis, -back);
       arrow.traverse((o) => { if (o instanceof THREE.Mesh) (o.material as THREE.MeshBasicMaterial).opacity = 0.35 + 0.6 * Math.sin(Math.PI * t); });
     }
@@ -491,10 +530,15 @@ export class ARStage {
   };
 
   private applyCamera() {
-    const vfov = THREE.MathUtils.degToRad(this.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect);
-    const d = ((this.fitRadius * this.scale) / Math.sin(Math.min(vfov, hfov) / 2)) * this.orbit.zoom;
-    const target = new THREE.Vector3(this.anchor.position.x, this.anchor.position.y + this.asmRadius * 0.3 * this.scale, this.anchor.position.z);
-    if (this.mode === "assist") target.set(0, this.asmRadius * 0.3 * this.scale, 0); // the camera view is screen-locked; the model moves instead
+    // Half-angles subtended by the free (uncovered) region; tan grows linearly per pixel across the full view frame.
+    const tanV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+    const half = Math.atan((tanV * Math.min(this.free.w, this.free.h)) / this.free.H);
+    // Training: a larger scale should still read as "bigger", so the camera backs off only by sqrt(scale).
+    // Assist: the camera is fixed (screen-locked over the real object); resizing/nudging moves the model instead.
+    const assist = this.mode === "assist";
+    const d = ((this.fitRadius * (assist ? 1 : Math.sqrt(this.scale))) / Math.sin(half)) * this.orbit.zoom;
+    const target = assist ? new THREE.Vector3(0, this.asmHeight * 0.55, 0)
+      : new THREE.Vector3(this.anchor.position.x, this.anchor.position.y + Math.min(this.asmHeight * 0.45, this.asmRadius * 0.8) * this.scale, this.anchor.position.z);
     const yaw = this.mode === "assist" ? 0 : this.orbit.yaw, pitch = this.mode === "assist" ? 0.75 : this.orbit.pitch;
     this.camera.position.set(target.x + Math.sin(yaw) * Math.cos(pitch) * d, target.y + Math.sin(pitch) * d, target.z + Math.cos(yaw) * Math.cos(pitch) * d);
     this.camera.lookAt(target);

@@ -35,6 +35,29 @@ export function useArStage(scenario: ForgeScenario, mode: StageMode, events: Sta
 
   useEffect(() => { void ARStage.arSupported().then(setXrSupported); }, []);
 
+  // Keep the screen-locked view framed inside the region the overlay panels leave free.
+  useEffect(() => {
+    const root = rootRef.current; if (!root || !stage) return;
+    const find = (cls: string) => root.querySelector(`.${cls}`);
+    let last: Record<"top" | "right" | "bottom" | "left", number> | null = null;
+    const measure = (immediate = false) => {
+      const box = root.getBoundingClientRect(), rect = (cls: string) => find(cls)?.getBoundingClientRect() ?? null;
+      const top = rect(styles.top), rail = rect(styles.rail), sheet = rect(styles.sheet);
+      const insets = { top: top ? top.bottom - box.top : 0, right: 0, bottom: 0, left: 0 };
+      if (sheet) { if (sheet.width > box.width * 0.6) insets.bottom = box.bottom - sheet.top; else insets.right = box.right - sheet.left; }
+      if (rail) insets.right = Math.max(insets.right, box.right - rail.left);
+      // Ignore small panel changes (a feedback line appearing) so the view does not shift under the user's finger.
+      const prev = last;
+      if (!immediate && prev && (Object.keys(insets) as Array<keyof typeof insets>).every((k) => Math.abs(insets[k] - prev[k]) < 72)) return;
+      last = insets; stage.setSafeArea(insets, immediate);
+    };
+    measure(true);
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(root);
+    for (const cls of [styles.top, styles.rail, styles.sheet]) { const el = find(cls); if (el) observer.observe(el); }
+    return () => observer.disconnect();
+  }, [stage]);
+
   // Taps on overlay controls must not also fire an XR "select" (which would place or grab parts).
   useEffect(() => {
     const root = rootRef.current; if (!root) return;

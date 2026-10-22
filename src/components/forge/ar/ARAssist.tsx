@@ -62,12 +62,10 @@ export function ARAssist({ scenario, onExit, operatorId }: ARModeProps) {
     if (data.status === "pass") {
       const verdict = ar.confirmStep(step);
       if (verdict?.ok) ar.setFeedback({ tone: "ok", text: data.message || "Looks right. Step recorded.", at: Date.now() });
-    } else if (data.status === "fail") {
-      ar.setFeedback({ tone: "bad", text: data.message, at: Date.now() });
-      void speak(data.message);
     } else {
-      ar.setFeedback({ tone: "warn", text: `${data.message} If it matches the ghost, confirm it yourself.`, at: Date.now() });
-      void speak(`I'm not sure. ${data.message}`);
+      // The result card shows the correction; clear any older banner so it is not shown twice.
+      ar.setFeedback(null);
+      void speak(data.status === "fail" ? data.message : `I'm not sure. ${data.message}`);
     }
   }
 
@@ -123,6 +121,8 @@ export function ARAssist({ scenario, onExit, operatorId }: ARModeProps) {
       {result.status !== "unsure" && <div className={styles.meter}><i style={{ width: `${Math.round(result.confidence * 100)}%`, background: result.status === "pass" ? "var(--ok)" : "var(--bad)" }} /></div>}
       <p>{result.message}</p>
       {result.observed && <p className={styles.muted}>Seen: {result.observed}</p>}
+      {result.status === "unsure" && <p className={styles.muted}>If your work matches the ghost, confirm it yourself below.</p>}
+      {result.status === "fail" && <p className={styles.muted}>Fix it, then check again.</p>}
     </div>
   );
 

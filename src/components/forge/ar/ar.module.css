@@ -32,7 +32,7 @@
 
 .middle{flex:1;display:flex;align-items:center;justify-content:space-between;pointer-events:none;gap:10px;min-height:0}
 .middle > *{pointer-events:auto}
-.rail{display:flex;flex-direction:column;gap:8px;margin-left:auto;padding:8px;border-radius:18px;background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(10px)}
+.rail{display:flex;flex-direction:column;gap:8px;margin-left:auto;padding:8px;max-height:100%;overflow-y:auto;scrollbar-width:none;border-radius:18px;background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(10px)}
 .rail button,.chipBtn{min-width:52px;height:52px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);font-weight:800;font-size:13px;display:grid;place-items:center;padding:0 8px}
 .rail button.on,.chipBtn.on{background:var(--cyan);color:var(--ink);border-color:var(--cyan)}
 .rail label{font:600 9px 'DM Mono',ui-monospace,monospace;letter-spacing:.12em;color:var(--muted);text-align:center;text-transform:uppercase}
@@ -42,7 +42,7 @@
 .center{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);pointer-events:none;text-align:center;max-width:80vw}
 .prompt{display:inline-block;padding:12px 18px;border-radius:16px;background:rgba(8,14,20,.78);border:1px solid rgba(56,217,245,.4);font-weight:700;font-size:15px;box-shadow:0 0 0 6px rgba(56,217,245,.06)}
 
-.sheet{border-radius:22px;background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(14px);box-shadow:0 -10px 40px rgba(0,0,0,.45);padding:14px 14px 12px;max-width:760px;width:100%;margin:0 auto;max-height:58vh;overflow:auto}
+.sheet{border-radius:22px;background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(14px);box-shadow:0 -10px 40px rgba(0,0,0,.45);padding:14px 14px 12px;max-width:760px;width:100%;margin:0 auto;max-height:58vh;overflow:auto;scrollbar-width:thin;scrollbar-color:rgba(140,170,190,.35) transparent;overscroll-behavior:contain}
 .kicker{display:flex;align-items:center;gap:8px;font:600 10px 'DM Mono',ui-monospace,monospace;letter-spacing:.16em;color:var(--amber);text-transform:uppercase}
 .kicker span{color:var(--muted)}
 .sheet h2{margin:6px 0 4px;font-size:19px;line-height:1.2;letter-spacing:-.02em}

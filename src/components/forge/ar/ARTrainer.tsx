@@ -36,7 +36,7 @@ export function ARTrainer({ scenario, onExit, operatorId }: ARModeProps) {
   const rail = (
     <>
       <label>Scale</label>
-      {SCALES.map((s) => <button key={s} type="button" className={cx(scale === s && styles.on)} onClick={() => setScale(s)}>{s}×</button>)}
+      <button type="button" className={cx(scale > 1 && styles.on)} onClick={() => setScale((s) => SCALES[(SCALES.indexOf(s) + 1) % SCALES.length])} aria-label={`Scale ${scale} times, tap to change`}>{scale}×</button>
       <label>Rotate</label>
       <button type="button" disabled={!selectedPart} onClick={() => stage?.rotateSelected(-90)} aria-label="Rotate selected part minus 90 degrees">⟲ 90</button>
       <button type="button" disabled={!selectedPart} onClick={() => stage?.rotateSelected(90)} aria-label="Rotate selected part 90 degrees">⟳ 90</button>
