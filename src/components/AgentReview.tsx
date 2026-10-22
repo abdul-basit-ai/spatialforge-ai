@@ -107,3 +107,66 @@ export function AgentReview({ scenario, operator }: { scenario: ScenarioId; oper
     </section>
   </>;
 }
+
+// ---------- Forge proposals ----------
+type ForgeChange = { hint?: string; warning?: string; voiceLine?: string; instruction?: string };
+type ForgeProposal = { id: string; based_on_version: string; step_id: string; kind: string; source: "llm" | "rules"; model: string | null; rationale: string; status: "pending" | "approved" | "rejected"; created_at: string; approved_version: string | null; guidance: { steps: Record<string, ForgeChange> }; evidence: { pattern?: { runsWithError: number; totalRuns: number; rate: number; operators: number; totalOperators: number; corrections: number; medianMs: number } } };
+type ForgeActive = { version: string; steps: Record<string, { title: string; instruction: string; voiceLine: string; hint: string; warning: string }> } | null;
+const FORGE_FIELDS: Array<[keyof ForgeChange, string]> = [["hint", "Hint"], ["warning", "Warning"], ["voiceLine", "Voice line"], ["instruction", "Instruction"]];
+
+// Critic proposals for one Forge scenario. Approving publishes the scenario as version + 1 with the new step text.
+export function ForgeProposalReview({ scenarioId, adminToken, canReview, onChange }: { scenarioId: string; adminToken: string; canReview: boolean; onChange?: () => void }) {
+  const [proposals, setProposals] = useState<ForgeProposal[]>([]);
+  const [active, setActive] = useState<ForgeActive>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
+  const load = useCallback(async () => {
+    const body = await fetch(`/api/agent/proposals?scenario=${encodeURIComponent(`forge:${scenarioId}`)}`).then((r) => r.ok ? r.json() : null).catch(() => null);
+    setProposals(body?.proposals ?? []); setActive(body?.active ?? null);
+  }, [scenarioId]);
+  useEffect(() => { void load(); }, [load]);
+  const post = async (path: string, body: unknown) => {
+    const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json", ...(adminToken ? { "x-admin-token": adminToken } : {}) }, body: JSON.stringify(body) });
+    const json = await response.json().catch(() => ({}));
+    if (response.status === 401) throw new Error("Admin access required: sign in as an admin operator or enter the admin token.");
+    if (!response.ok && !json.results) throw new Error(json.error || `Request failed (${response.status})`);
+    return json;
+  };
+  const runCritic = async () => {
+    setBusy("critic"); setNotice("Critic is reading group analytics…");
+    try {
+      const json = await post("/api/agent/critic", { scenarioId });
+      const result = json.results?.[0];
+      setNotice(result?.error && !result.ok ? `Critic failed: ${result.error}` : result?.proposals?.length ? `${result.proposals.length} new ${result.source === "llm" ? "LLM" : "rule-based"} proposal${result.proposals.length === 1 ? "" : "s"} on v${result.version}.${result.llmError ? ` (LLM unavailable: ${result.llmError})` : ""}` : `No new proposal: ${result?.proposalSkipped ?? "nothing passed the threshold"}.`);
+      await load();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Critic failed"); }
+    finally { setBusy(null); }
+  };
+  const review = async (proposal: ForgeProposal, action: "approve" | "reject") => {
+    setBusy(proposal.id);
+    try {
+      const json = await post(`/api/agent/proposals/${proposal.id}`, { action });
+      setNotice(action === "approve" ? `Approved. ${scenarioId} v${json.version} is published; the next sessions get the new text and Coach caches were cleared.` : "Proposal rejected.");
+      await load(); onChange?.();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Review failed"); }
+    finally { setBusy(null); }
+  };
+  return <section className="pf-panel">
+    <div className="pf-head"><div><div className="pf-kicker">CRITIC · FORGE PROPOSALS</div><h2>{proposals.filter((item) => item.status === "pending").length} awaiting review{active ? ` · live v${active.version}` : ""}</h2></div>
+      <button type="button" className="pf-small-btn primary" disabled={busy !== null || !canReview} onClick={runCritic}>{busy === "critic" ? "Running…" : "Run critic"}</button></div>
+    {notice && <p className="pf-msg info" role="status" style={{ marginTop: 0 }}>{notice}</p>}
+    {proposals.length ? proposals.map((proposal) => {
+      const change = proposal.guidance.steps?.[proposal.step_id] ?? {};
+      const current = active?.steps[proposal.step_id];
+      const evidence = proposal.evidence.pattern;
+      return <article key={proposal.id} className={`pf-proposal is-${proposal.status}`}>
+        <header><strong>{current?.title ?? proposal.step_id}</strong><span className="pf-pill amber">{proposal.kind}</span><span className={`pf-pill ${proposal.source === "llm" ? "cyan" : ""}`}>{proposal.source === "llm" ? "LLM" : "RULES"}</span><span className="pf-status">{proposal.status === "approved" ? `APPROVED → v${proposal.approved_version}` : proposal.status.toUpperCase()} · based on v{proposal.based_on_version}</span></header>
+        {evidence && <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12 }}><span><b>{evidence.runsWithError}/{evidence.totalRuns}</b> runs ({pct(evidence.rate)})</span><span><b>{evidence.operators}/{evidence.totalOperators}</b> operators</span><span><b>{evidence.corrections}</b> mistakes</span>{evidence.medianMs > 0 && <span>median <b>{(evidence.medianMs / 1000).toFixed(1)}s</b></span>}</div>}
+        <p className="pf-rationale">{proposal.rationale}</p>
+        <table className="pf-diff"><thead><tr><th>Field</th><th>Current (v{active?.version ?? proposal.based_on_version})</th><th>Proposed</th></tr></thead><tbody>{FORGE_FIELDS.filter(([field]) => change[field]).map(([field, label]) => <tr key={field}><th scope="row">{label}</th><td className="old">{current?.[field] || <i>none</i>}</td><td className="new">{change[field]}</td></tr>)}</tbody></table>
+        {proposal.status === "pending" && <div style={{ display: "flex", gap: 8, alignItems: "center" }}><button type="button" className="pf-small-btn primary" disabled={busy !== null || !canReview} onClick={() => review(proposal, "approve")}>{busy === proposal.id ? "Publishing…" : "Approve & publish"}</button><button type="button" className="pf-small-btn" disabled={busy !== null || !canReview} onClick={() => review(proposal, "reject")}>Reject</button>{!canReview && <small style={{ color: "var(--pf-muted)" }}>Admin access required to review.</small>}</div>}
+        <small style={{ color: "var(--pf-muted)", fontSize: 10 }}>{proposal.model ? `${proposal.model} · ` : ""}{new Date(proposal.created_at).toLocaleString()}</small>
+      </article>;
+    }) : <p className="pf-empty">No proposals yet. The Critic runs after each completed session and proposes text when a step passes 30% of runs and 5 runs.</p>}
+  </section>;
+}

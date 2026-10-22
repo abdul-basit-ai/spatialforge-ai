@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { getScenario, partFor, SCENARIO_IDS } from "@/lib/assembly";
 import { useAssemblyStore } from "@/lib/store";
 import { AgentReview } from "@/components/AgentReview";
+import { ForgePeople } from "./ForgePeople";
 import type { SpatialEvent } from "@/lib/spatial-engine";
 
 export default function Admin() {
@@ -30,7 +31,11 @@ export default function Admin() {
   return <div className="app-shell">
     <header className="topbar"><Link href="/" className="brand"><span className="brand-mark">◇</span><span>SPATIAL<span className="brand-accent">FORGE</span></span><span className="brand-ai">AI</span></Link><Link className="admin-link" href="/">← Back to assembly</Link></header>
     <main className="main admin-main">
-      <div className="eyebrow"><span className="eyebrow-line" /> RUN REVIEW / OPERATOR {operator}</div>
+      <div className="eyebrow"><span className="eyebrow-line" /> FORGE / PEOPLE, MEMORY AND STRUGGLE ANALYTICS</div>
+      <h1>Forge operations</h1>
+      <p className="lede" style={{ marginBottom: 18 }}>Who is training, where the group struggles on each scenario version, what each operator&apos;s Coach remembers, and Critic proposals waiting for approval.</p>
+      <ForgePeople />
+      <div className="eyebrow" style={{ marginTop: 40 }}><span className="eyebrow-line" /> RUN REVIEW / OPERATOR {operator}</div>
       <h1>Assembly activity</h1>
       <p className="lede">Review the selected scenario. Placement, prerequisite, target, orientation, and tracking corrections are recorded locally for this operator.</p>
       <div className="scenario-tabs admin-scenario-tabs">{SCENARIO_IDS.map((id) => <button type="button" key={id} className={scenario === id ? "selected" : ""} onClick={() => setScenario(id)}>{getScenario(id).name}<small>{id === scenario ? "Selected" : "View run"}</small></button>)}</div>

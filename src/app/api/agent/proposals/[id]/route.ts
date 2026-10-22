@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/admin";
+import { adminDenied, getOperator } from "@/lib/auth";
+import { isForgeScenarioKey, reviewForgeProposal } from "@/lib/agent/critic-forge";
 import { invalidateScenarioCache, isScenario } from "@/lib/agent/guidance-store";
 import { cleanGuidance, mergeGuidance, nextVersion } from "@/lib/guidance";
 import { isUuid, postgres } from "@/lib/db/postgres";
@@ -9,14 +10,20 @@ export const dynamic = "force-dynamic";
 
 // Admin review. { action: "approve" } creates the next dag_versions row (1.0 -> 1.1) with the proposal merged into
 // the active guidance, makes it the single active version, and invalidates Coach caches. { action: "reject" } closes it.
+// Forge proposals (scenario_id "forge:<id>") are published as a new Forge scenario version instead (see critic-forge.ts).
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const denied = requireAdmin(request);
+  const denied = adminDenied(request);
   if (denied) return denied;
   const { id } = await params;
   const body = await request.json().catch(() => ({})) as { action?: string; reviewer?: string };
   if (!isUuid(id) || (body.action !== "approve" && body.action !== "reject")) return NextResponse.json({ error: "Invalid proposal or action" }, { status: 400 });
-  const reviewer = typeof body.reviewer === "string" && body.reviewer.trim() ? body.reviewer.trim().slice(0, 64) : "admin";
+  const reviewer = typeof body.reviewer === "string" && body.reviewer.trim() ? body.reviewer.trim().slice(0, 64) : getOperator(request)?.name ?? "admin";
   const db = postgres();
+  const forge = db ? await db.query("select scenario_id from agent_proposals where id = $1", [id]).then((result) => isForgeScenarioKey(result.rows[0]?.scenario_id)).catch(() => false) : true;
+  if (forge) {
+    const result = await reviewForgeProposal(id, body.action, reviewer);
+    return result.ok ? NextResponse.json(result) : NextResponse.json({ error: result.error }, { status: result.status });
+  }
   if (!db) return NextResponse.json({ error: "DATABASE_URL is not set" }, { status: 503 });
   const client = await db.connect().catch((error) => { console.error("proposals: connect failed", errorMessage(error)); return null; });
   if (!client) return NextResponse.json({ error: "Proposal store unavailable" }, { status: 502 });
