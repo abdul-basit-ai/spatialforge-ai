@@ -70,3 +70,16 @@ create table if not exists agent_proposals (
   reviewed_at timestamptz
 );
 create index if not exists agent_proposals_status_idx on agent_proposals(scenario_id, status, created_at desc);
+-- step_id/kind identify the pattern; source says whether the LLM or the deterministic rules wrote the text.
+alter table agent_proposals add column if not exists step_id text not null default '';
+alter table agent_proposals add column if not exists kind text not null default '';
+alter table agent_proposals add column if not exists source text not null default 'rules';
+alter table agent_proposals add column if not exists model text;
+alter table agent_proposals add column if not exists session_id uuid;
+alter table agent_proposals add column if not exists reviewed_by text;
+alter table agent_proposals add column if not exists approved_version text;
+do $$ begin
+  alter table agent_proposals add constraint agent_proposals_source_check check (source in ('llm','rules'));
+exception when duplicate_object then null; end $$;
+-- One open proposal per pattern and instruction version.
+create unique index if not exists agent_proposals_pending_idx on agent_proposals(scenario_id, based_on_version, step_id, kind) where status = 'pending';

@@ -25,7 +25,9 @@ Set these in the platform's secret store, not in the image or repo:
 | `CLICKHOUSE_DATABASE` | optional, defaults to `default` |
 | `VALKEY_URL` | Valkey URI (`rediss://...`) |
 | `AIVEN_CA_CERT` | contents of `ca.pem` (literal `\n` is accepted) or a path to it inside the container |
-| `ADMIN_TOKEN`, `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | as needed |
+| `ADMIN_TOKEN` | shared secret for `/admin` actions and `POST /api/agent/critic`; admin actions are disabled (503) when unset |
+| `OPENROUTER_API_KEY` | optional; enables the LLM Critic and Coach (pinned `z-ai/glm-5.3-flash`). Unset: deterministic rules |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | optional neural voice |
 
 With `AIVEN_CA_CERT` set, PostgreSQL uses verified TLS (equivalent to `sslmode=verify-full`; any `sslmode` in the URI is replaced), and ClickHouse (https) and Valkey (rediss) trust the Aiven CA in addition to public roots. Any unset service falls back to `persisted: false`.
 
@@ -38,7 +40,17 @@ docker run --rm -p 3000:3000 --env-file .env.production spatialforge-ai
 
 The container listens on `PORT` (default 3000) on `0.0.0.0` and runs as a non-root user. Its built-in `HEALTHCHECK` calls `GET /api/health`, which returns 200 when every configured service is reachable and 503 when one is down.
 
-## 4. Smoke test the deployed URL
+## 4. Critic worker
+
+Completed runs queue jobs on the Valkey list `sf:critic:jobs`. They are processed when an admin presses **Run critic** on `/admin`, or by any scheduler that calls:
+
+```sh
+curl -X POST https://<app>/api/agent/critic -H "x-admin-token: $ADMIN_TOKEN" -H "content-type: application/json" -d '{"max":10}'
+```
+
+Failed jobs are kept on `sf:critic:failed`. The route allows up to 180 s, because the LLM is a reasoning model.
+
+## 5. Smoke test the deployed URL
 
 - The URL must be HTTPS (iPhone camera access requires a secure context).
 - `GET /api/health` returns `"ok": true` with each service `"ok"`.

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { getScenario, partFor, SCENARIO_IDS } from "@/lib/assembly";
 import { useAssemblyStore } from "@/lib/store";
+import { AgentReview } from "@/components/AgentReview";
 import type { SpatialEvent } from "@/lib/spatial-engine";
 
 export default function Admin() {
@@ -11,7 +12,11 @@ export default function Admin() {
   const [telemetry, setTelemetry] = useState<SpatialEvent[]>([]);
   const [replayIndex, setReplayIndex] = useState(0);
   const [sessions, setSessions] = useState<Array<{ id: string; scenario_id: string; mode: string; started_at: string }>>([]);
-  useEffect(() => { hydrate(); }, [hydrate]);
+  useEffect(() => {
+    hydrate();
+    const linked = new URLSearchParams(window.location.search).get("scenario"); // /admin?scenario=valve deep link
+    if (linked && (SCENARIO_IDS as string[]).includes(linked)) setScenario(linked as typeof SCENARIO_IDS[number]);
+  }, [hydrate, setScenario]);
   useEffect(() => {
     try { setTelemetry(JSON.parse(localStorage.getItem("spatialforge:telemetry:v1") || "[]") as SpatialEvent[]); } catch { setTelemetry([]); }
     fetch("/api/sessions").then((response) => response.ok ? response.json() : null).then((body) => setSessions(body?.sessions || [])).catch(() => undefined);
@@ -36,6 +41,7 @@ export default function Admin() {
         <div className="information-card"><div className="card-kicker">TELEMETRY</div><strong>{telemetry.length}</strong><p>Queued semantic events on this device</p></div>
       </div>
       <section className="admin-activity information-card"><div className="admin-section-heading"><div><div className="card-kicker">SESSION REPLAY</div><h2>{telemetry.length ? `Event ${Math.min(replayIndex + 1, telemetry.length)} of ${telemetry.length}` : "No queued events"}</h2></div><div><button type="button" onClick={() => setReplayIndex((value) => Math.max(0, value - 1))}>←</button><button type="button" onClick={() => setReplayIndex((value) => Math.min(Math.max(telemetry.length - 1, 0), value + 1))}>→</button></div></div>{telemetry.length ? <div className="activity-row"><span className="activity-indicator success" /><div><strong>{telemetry[replayIndex]?.type}</strong><small>{telemetry[replayIndex]?.mode} · {telemetry[replayIndex]?.source || "system"} · sequence {telemetry[replayIndex]?.sequence}</small></div><time>{new Date(telemetry[replayIndex]?.at).toLocaleString()}</time></div> : <p className="empty-activity">Start a run to create replayable events.</p>}</section>
+      <AgentReview scenario={scenario} operator={operator} />
       <section className="admin-activity information-card"><div className="admin-section-heading"><div><div className="card-kicker">CLOUD SESSIONS</div><h2>{sessions.length} recorded sessions</h2></div><span>POSTGRESQL WHEN CONFIGURED</span></div>{sessions.length ? <div className="activity-list">{sessions.slice(0, 10).map((session) => <div className="activity-row" key={session.id}><span className="activity-indicator success" /><div><strong>{session.scenario_id} · {session.mode}</strong><small>{session.id}</small></div><time>{new Date(session.started_at).toLocaleString()}</time></div>)}</div> : <p className="empty-activity">Cloud session persistence is unavailable or has no sessions yet.</p>}</section>
       <section className="admin-activity information-card"><div className="admin-section-heading"><div><div className="card-kicker">EVENT LOG</div><h2>Latest activity</h2></div><span>LOCAL BROWSER DATA</span></div>{activity.length ? <div className="activity-list">{activity.map((item, index) => <div className="activity-row" key={`${item.at}-${index}`}><span className={`activity-indicator ${item.kind}`} /><div><strong>{item.title}</strong><small>{item.detail}</small></div><time dateTime={item.at}>{new Date(item.at).toLocaleString()}</time></div>)}</div> : <p className="empty-activity">No activity yet. Start a run to see placement and correction events here.</p>}</section>
       {passport && <div className="information-card admin-passport"><div className="card-kicker">DEMO PASSPORT</div><code className="hash">SHA-256 · {passport}</code></div>}
