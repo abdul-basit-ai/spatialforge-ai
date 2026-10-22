@@ -1,6 +1,7 @@
 import { aiJson, MODEL, openaiConfigured, type InputPart } from "@/lib/ai/openai";
 import { attachAssets, getScenario, saveAsset, saveScenario, slugify } from "../repo";
 import type { ForgeScenario, ForgeSource } from "../types";
+import { BUILTIN_SCENARIOS } from "../samples";
 import { validateScenario } from "../validate";
 import { cadSkeleton, mergeCadDraft, scenarioFromGenerated, toGeneratedDraft } from "./build";
 import { convertCad } from "./cad-convert";
@@ -53,13 +54,14 @@ async function repairGenerated(draft: GeneratedDraft, problems: string[], blocki
 async function compileCad(req: CompileRequest, cad: CadInput, evidence: Evidence, source: ForgeSource, title: string, log: CompileLog) {
   const plan = planSequence(cad.parts);
   for (const note of plan.notes) log.add(note);
-  log.add(`Disassembly order: ${plan.steps.map((s) => (s.kind === "place" ? s.nodes[0] : `[${s.nodes.length} ${s.family}]`)).join(" -> ")}.`);
+  log.add(`Install order (reverse of the disassembly): ${plan.steps.map((s) => (s.kind === "place" ? s.nodes[0] : `[${s.nodes.length} ${s.family}]`)).join(" -> ")}.`);
   const skeleton = cadSkeleton(cad, plan, { title, domain: req.domain, source });
   if (!openaiConfigured()) { log.add("OpenAI not configured: using the deterministic CAD procedure text."); return skeleton.scenario; }
   const table = cad.parts.map((p) => ({ id: skeleton.partIdByNode.get(p.node), node: p.node, sizeMm: [0, 1, 2].map((k) => round3(Math.abs(p.bbox.max[k] - p.bbox.min[k]))), centerMm: p.position.map(round3), insertAxis: plan.axes[p.node], triangles: p.triangles }));
   const steps = skeleton.skeletonSteps.map((s) => ({ id: s.id, kind: s.kind, partIds: s.partIds, draftTitle: s.title }));
   const input: InputPart[] = [{ type: "input_text", text: `${requestText(req, evidence)}\n\nCAD parts (assembly frame, Y-up, millimetres):\n${JSON.stringify(table)}\n\nBase part (already in place): ${skeleton.scenario.baseParts[0]}\n\nSkeleton steps in the fixed order:\n${JSON.stringify(steps)}` }, ...evidence.media];
   const timeoutMs = Math.min(150000, log.remaining() - 20000);
+  if (timeoutMs < 30000) { log.add("Not enough time left to write the procedure with AI; keeping the deterministic text."); return skeleton.scenario; }
   log.add(`Writing the procedure with ${MODEL} (reasoning medium) around ${steps.length} fixed steps.`);
   const result = await aiJson("forge-compile-cad", CadDraftSchema, CAD_INSTRUCTIONS, input, { model: MODEL, reasoning: "medium", maxOutputTokens: 32000, timeoutMs });
   if (!result.ok) { log.add(`Procedure writing failed (${result.error}); keeping the deterministic text.`); return skeleton.scenario; }
@@ -67,6 +69,15 @@ async function compileCad(req: CompileRequest, cad: CadInput, evidence: Evidence
   log.add(`Procedure merged in ${secs(result.ms)}: ${merged.extras} extra step(s) added${merged.dropped ? `, ${merged.dropped} invented install step(s) dropped` : ""}.`);
   if (result.data.notes) merged.scenario.source = { ...merged.scenario.source, notes: [merged.scenario.source.notes, result.data.notes].filter(Boolean).join(" ") };
   return merged.scenario;
+}
+
+// Keyword overlap between the prompt and the built-in scenarios (used only when OpenAI is not configured).
+const STOP = new Set(["the", "and", "with", "for", "how", "train", "teach", "assemble", "assembly", "build", "small", "this", "that"]);
+const words = (text: string) => new Set((text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []).filter((w) => !STOP.has(w)));
+function closestBuiltin(prompt: string): ForgeScenario | null {
+  const wanted = words(prompt);
+  const scored = BUILTIN_SCENARIOS.map((s) => ({ s, n: [...words(`${s.id.replace(/-/g, " ")} ${s.title} ${s.summary}`)].filter((w) => wanted.has(w)).length })).filter((x) => x.n > 0);
+  return scored.sort((a, b) => b.n - a.n)[0]?.s ?? null;
 }
 
 async function uniqueId(title: string, req: CompileRequest): Promise<{ id: string; version: number }> {
@@ -95,7 +106,7 @@ export async function compileScenario(req: CompileRequest, log = new CompileLog(
   if (!cad && evidence.cadFiles.length) {
     const file = evidence.cadFiles[0];
     try {
-      const converted = await convertCad(file.bytes, file.name, file.format);
+      const converted = await convertCad(file.bytes, file.name, file.format, Math.min(120000, Math.max(20000, log.remaining() - 90000)));
       converted.notes.forEach((n) => log.add(n));
       const assetId = await saveAsset({ name: `${file.name.replace(/\.[^.]+$/, "")}.glb`, mime: "model/gltf-binary", bytes: converted.glb, meta: { sourceAssetId: file.assetId, format: file.format, parts: converted.parts.length } });
       cad = { assetId, parts: converted.parts }; attach.add(assetId);
@@ -106,14 +117,20 @@ export async function compileScenario(req: CompileRequest, log = new CompileLog(
 
   const promptOnly = !req.assets.length && !cad;
   if (promptOnly && !req.prompt?.trim()) throw new CompileError("Provide a prompt, files or a CAD part list.");
-  if (!cad && !ai) throw new CompileError("OpenAI is not configured; without it only CAD imports can be compiled.", 503);
-
   let draft: ForgeScenario | null = null;
+  if (!cad && !ai) {
+    // No OpenAI: a prompt can still start from the closest built-in scenario; anything else needs CAD.
+    const builtin = promptOnly ? closestBuiltin(req.prompt!) : null;
+    if (!builtin) throw new CompileError("OpenAI is not configured; without it only CAD imports (or prompts matching a built-in scenario) can be compiled.", 503);
+    log.add(`OpenAI not configured: starting from the built-in "${builtin.title}" scenario.`);
+    draft = { ...structuredClone(builtin), source: { ...builtin.source, prompt: req.prompt, notes: `Copied from the built-in "${builtin.title}" scenario (OpenAI not configured).` } };
+  }
+
   let assumptions: string[] = [];
   let generation: ReturnType<typeof generateDraft> | null = null;
-  if (promptOnly) {
+  if (promptOnly && !draft) {
     // Search for open CAD and design from knowledge in parallel; open CAD wins when it downloads and parses.
-    generation = generateDraft(req, evidence, log, Math.min(175000, log.remaining() - 30000));
+    generation = generateDraft(req, evidence, log, Math.min(145000, log.remaining() - 30000));
     const web: WebSearchOutcome = await findWebCad(req.prompt!, log);
     citations = web.citations;
     if (web.cad) {
@@ -131,8 +148,13 @@ export async function compileScenario(req: CompileRequest, log = new CompileLog(
     const title = req.prompt?.trim() ? req.prompt.trim().replace(/^(train me (to|on)|teach me (to|how to)|how to)\s+/i, "").replace(/^(assemble|build)\s+(an?\s+|the\s+)?/i, "").replace(/^./, (c) => c.toUpperCase()).slice(0, 80) : fileTitle || "Imported assembly";
     if (source.kind === "upload") source.notes = "Install order computed by disassembly analysis of the CAD bounding boxes.";
     draft = await compileCad(req, cad, evidence, source, title, log);
-  } else {
-    const result = generation ? await generation : await generateDraft(req, evidence, log, Math.min(175000, log.remaining() - 30000));
+  } else if (!draft) {
+    let result = generation ? await generation : await generateDraft(req, evidence, log, Math.min(145000, log.remaining() - 30000));
+    if (!result.ok && log.remaining() > 55000) {
+      log.add("Retrying the design once with low reasoning effort.");
+      result = await aiJson("forge-compile-generate-retry", GeneratedDraftSchema, GENERATE_INSTRUCTIONS, [{ type: "input_text", text: requestText(req, evidence) }, ...evidence.media], { model: MODEL, reasoning: "low", maxOutputTokens: 32000, timeoutMs: log.remaining() - 12000 });
+      log.add(result.ok ? `Retry draft: ${result.data.parts.length} parts, ${result.data.steps.length} steps in ${secs(result.ms)}.` : `Retry failed: ${result.error}`);
+    }
     if (!result.ok) throw new CompileError(`Scenario generation failed: ${result.error}`, 502);
     assumptions = result.data.assumptions;
     if (source.kind === "upload") source = { ...source, approximation: true, notes: "Geometry estimated from the manual/photos as parametric parts." };

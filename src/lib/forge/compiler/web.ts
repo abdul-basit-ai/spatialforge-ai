@@ -68,7 +68,8 @@ export async function findWebCad(request: string, log: CompileLog): Promise<WebS
   log.add("Searching the web for an openly licensed CAD file.");
   const search = await aiJson("forge-web-cad", SearchSchema, SEARCH_INSTRUCTIONS, `Assembly request: ${request}`, { model: MODEL, webSearch: true, reasoning: "low", timeoutMs: Math.min(75000, Math.max(20000, log.remaining() - 120000)), maxOutputTokens: 6000 });
   if (!search.ok) { log.add(`Web search failed: ${search.error}`); return outcome; }
-  outcome.citations = search.citations;
+  // Annotations are often empty with JSON replies; the candidate pages the search found are the citations then.
+  outcome.citations = search.citations.length ? search.citations : search.data.candidates.map((c) => ({ title: `${c.title}${c.license && c.license !== "unknown" ? ` (${c.license})` : ""}`, url: c.url }));
   log.add(`Web search returned ${search.data.candidates.length} candidate(s) and ${search.citations.length} citation(s) in ${(search.ms / 1000).toFixed(1)}s.`);
   for (const candidate of search.data.candidates.slice(0, MAX_ATTEMPTS)) {
     if (log.remaining() < 110000) { log.add("Out of time budget for downloads; generating instead."); break; }
@@ -79,7 +80,7 @@ export async function findWebCad(request: string, log: CompileLog): Promise<WebS
       const fileName = decodeURIComponent(url.pathname.split("/").pop() || "model");
       const format = detectCadFormat(file.bytes, fileName);
       if (!format) throw new Error(`not a STEP/IGES/STL/GLB file (${file.contentType || "unknown type"})`);
-      const converted = await convertCad(file.bytes, fileName, format);
+      const converted = await convertCad(file.bytes, fileName, format, Math.min(60000, Math.max(10000, log.remaining() - 110000)));
       if (converted.parts.length < MIN_PARTS) throw new Error(`only ${converted.parts.length} body(ies); need an assembly`);
       outcome.tried.push({ url: url.href, result: `ok: ${format} with ${converted.parts.length} parts` });
       log.add(`Downloaded ${fileName} (${(file.bytes.length / 1024).toFixed(0)} KB, ${format.toUpperCase()}, ${converted.parts.length} parts) from ${url.hostname}.`);

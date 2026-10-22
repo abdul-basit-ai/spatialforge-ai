@@ -78,15 +78,33 @@ export function planSequence(parts: CadPart[]): SequencePlan {
   const base = volume(boxes.get(lowest.node)!) >= 0.25 * volume(boxes.get(byVolume[0].node)!) ? lowest : byVolume[0];
   notes.push(`Base part: ${base.name || base.node} (${base === lowest ? "lowest" : "largest"} body).`);
 
-  // Disassembly over bodies. Among removable parts, take the top-most first (then the smallest), preferring lift-off.
+  // Contact graph between bodies: a removal that would split the remaining parts into more pieces is avoided,
+  // so a part is only installed after something it touches (a side bracket follows the housing it bolts to).
+  const touches = (a: Box, b: Box) => [0, 1, 2].every((k) => Math.min(a.max[k], b.max[k]) - Math.max(a.min[k], b.min[k]) >= -eps * 2);
+  const contact = new Map(bodies.map((p) => [p.node, new Set(bodies.filter((q) => q.node !== p.node && touches(boxes.get(p.node)!, boxes.get(q.node)!)).map((q) => q.node))]));
+  const components = (nodes: Set<string>) => {
+    const seen = new Set<string>();
+    let count = 0;
+    for (const start of nodes) {
+      if (seen.has(start)) continue;
+      count++;
+      const stack = [start]; seen.add(start);
+      while (stack.length) for (const next of contact.get(stack.pop()!) ?? []) if (nodes.has(next) && !seen.has(next)) { seen.add(next); stack.push(next); }
+    }
+    return count;
+  };
+
+  // Disassembly over bodies. Among removable parts, keep the rest connected, then take the top-most first (then the smallest), preferring lift-off.
   const remaining = new Set(bodies.map((part) => part.node).filter((node) => node !== base.node));
   const removed: Array<{ node: string; axis: Vec3; interlocked?: boolean }> = [];
   while (remaining.size) {
     const present = (except: string) => [base.node, ...remaining].filter((node) => node !== except).map((node) => boxes.get(node)!);
-    const candidates = [...remaining].map((node) => ({ node, box: boxes.get(node)!, dir: removalDirection(boxes.get(node)!, present(node), eps) })).filter((c) => c.dir);
+    const now = components(new Set([base.node, ...remaining]));
+    const candidates = [...remaining].map((node) => ({ node, box: boxes.get(node)!, dir: removalDirection(boxes.get(node)!, present(node), eps) })).filter((c) => c.dir)
+      .map((c) => ({ ...c, splits: components(new Set([base.node, ...[...remaining].filter((node) => node !== c.node)])) > now - (contact.get(c.node)!.size ? 0 : 1) ? 1 : 0 }));
     const rank = (c: { box: Box; dir: { axis: number; sign: number } | null }) => DIRECTIONS.findIndex((d) => d.axis === c.dir!.axis && d.sign === c.dir!.sign) > 0 ? 1 : 0;
     // Lift-off candidates: top-most first, then smallest. Sideways candidates: smallest first (a rod slides out before the brackets it threads).
-    candidates.sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.box.max[1] - a.box.max[1] : 0) || volume(a.box) - volume(b.box));
+    candidates.sort((a, b) => a.splits - b.splits || rank(a) - rank(b) || (rank(a) === 0 ? b.box.max[1] - a.box.max[1] : 0) || volume(a.box) - volume(b.box));
     const pick = candidates[0];
     if (pick) {
       removed.push({ node: pick.node, axis: unit(pick.dir!.axis, -pick.dir!.sign) });
@@ -107,7 +125,6 @@ export function planSequence(parts: CadPart[]): SequencePlan {
   // Fasteners. Screws/bolts hold the latest-installed body they touch (base counts as earliest; else the nearest body).
   // Nuts and washers threaded on a bolt follow that bolt's holder: washers on the approach side go first, nuts after.
   const installIndex = new Map<string, number>([[base.node, -1], ...order.map((item, i) => [item.node, i] as [string, number])]);
-  const touches = (a: Box, b: Box) => [0, 1, 2].every((k) => Math.min(a.max[k], b.max[k]) - Math.max(a.min[k], b.min[k]) >= -eps * 2);
   const mid = lo.map((v, i) => (v + hi[i]) / 2);
   const kindOf = (part: CadPart) => (/washer/i.test(`${part.name} ${part.node}`) ? "washer" : /nut\b|nut[\s_\-\d(]|4032|934/i.test(`${part.name} ${part.node}`) ? "nut" : "male");
   const fastenerAxis = (part: CadPart, kind: string): Vec3 => {

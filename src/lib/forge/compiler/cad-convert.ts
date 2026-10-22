@@ -30,43 +30,46 @@ export function detectCadFormat(bytes: Buffer, name = ""): CadFormat | null {
   return null;
 }
 
-// occt-import-js is loaded at runtime (not bundled) so its WASM file resolves from node_modules.
-let occtPromise: Promise<OcctModule> | null = null;
-type OcctNode = { name?: string; meshes?: number[]; children?: OcctNode[] };
-type OcctMesh = { name?: string; color?: number[]; attributes: { position: { array: number[] } }; index?: { array: number[] } };
-type OcctResult = { success: boolean; root?: OcctNode; meshes?: OcctMesh[] };
-type OcctModule = { ReadStepFile: (c: Uint8Array, p: unknown) => OcctResult; ReadIgesFile: (c: Uint8Array, p: unknown) => OcctResult };
-function occt(): Promise<OcctModule> {
-  if (!occtPromise) {
-    // Built-in lookup keeps webpack from rewriting createRequire inside the Next server bundle.
-    const nodeModule = (process as unknown as { getBuiltinModule?: (id: string) => typeof import("node:module") }).getBuiltinModule?.("node:module");
-    const nodeRequire = (nodeModule?.createRequire ?? createRequire)(path.join(process.cwd(), "package.json"));
-    const entry = nodeRequire.resolve("occt-import-js");
-    const factory = nodeRequire(entry) as (options: { locateFile: (file: string) => string }) => Promise<OcctModule>;
-    occtPromise = factory({ locateFile: (file) => path.join(path.dirname(entry), file) });
-    occtPromise.catch(() => { occtPromise = null; });
-  }
-  return occtPromise;
-}
-
-async function readOcct(bytes: Buffer, format: "step" | "iges"): Promise<RawMesh[]> {
-  const module = await occt();
-  const params = { linearUnit: "meter", linearDeflectionType: "bounding_box_ratio", linearDeflection: 0.002, angularDeflection: 0.5 };
-  const result = format === "step" ? module.ReadStepFile(new Uint8Array(bytes), params) : module.ReadIgesFile(new Uint8Array(bytes), params);
-  if (!result.success || !result.meshes?.length) throw new Error(`${format.toUpperCase()} file could not be read`);
-  const meshName = new Map<number, string>();
-  const walk = (node: OcctNode, trail: string) => {
-    const label = node.name?.trim() || trail;
-    for (const index of node.meshes ?? []) meshName.set(index, label);
-    for (const child of node.children ?? []) walk(child, label);
-  };
+// occt-import-js runs in a worker thread: parsing a large STEP is synchronous WASM work that would otherwise freeze the
+// whole server (every timer, download and OpenAI call) for minutes. The worker is eval'd from a string and loads the
+// package at runtime from node_modules, so the Next bundler never touches it; it is terminated when the time limit hits.
+const OCCT_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+const path = require("node:path");
+const nodeRequire = require("node:module").createRequire(path.join(workerData.cwd, "package.json"));
+const entry = nodeRequire.resolve("occt-import-js");
+nodeRequire(entry)({ locateFile: (file) => path.join(path.dirname(entry), file) }).then((occt) => {
+  const bytes = new Uint8Array(workerData.bytes);
+  const result = workerData.format === "step" ? occt.ReadStepFile(bytes, workerData.params) : occt.ReadIgesFile(bytes, workerData.params);
+  if (!result.success || !result.meshes || !result.meshes.length) { parentPort.postMessage({ error: "file could not be read" }); return; }
+  const names = new Map();
+  const walk = (node, trail) => { const label = (node.name || "").trim() || trail; for (const i of node.meshes || []) names.set(i, label); for (const child of node.children || []) walk(child, label); };
   if (result.root) walk(result.root, "Part");
-  return result.meshes.map((mesh, i) => ({
-    name: mesh.name?.trim() || meshName.get(i) || `Part ${i + 1}`,
+  const meshes = result.meshes.map((mesh, i) => ({
+    name: (mesh.name || "").trim() || names.get(i) || "Part " + (i + 1),
     positions: new Float32Array(mesh.attributes.position.array),
     indices: mesh.index ? new Uint32Array(mesh.index.array) : undefined,
     color: mesh.color && mesh.color.length >= 3 ? [mesh.color[0], mesh.color[1], mesh.color[2]] : undefined,
   }));
+  parentPort.postMessage({ meshes }, meshes.flatMap((m) => (m.indices ? [m.positions.buffer, m.indices.buffer] : [m.positions.buffer])));
+}).catch((error) => parentPort.postMessage({ error: String((error && error.message) || error) }));
+`;
+
+type Threads = typeof import("node:worker_threads");
+function readOcct(bytes: Buffer, format: "step" | "iges", timeoutMs: number): Promise<RawMesh[]> {
+  // Built-in lookup keeps webpack from rewriting the worker_threads import inside the Next server bundle.
+  const threads = (process as unknown as { getBuiltinModule?: (id: string) => Threads }).getBuiltinModule?.("node:worker_threads") ?? (createRequire(path.join(process.cwd(), "package.json"))("node:worker_threads") as Threads);
+  const params = { linearUnit: "meter", linearDeflectionType: "bounding_box_ratio", linearDeflection: 0.003, angularDeflection: 0.6 };
+  const copy = new Uint8Array(bytes); // own buffer so it can be transferred
+  return new Promise((resolve, reject) => {
+    const worker = new threads.Worker(OCCT_WORKER, { eval: true, workerData: { cwd: process.cwd(), format, params, bytes: copy.buffer }, transferList: [copy.buffer], resourceLimits: { maxOldGenerationSizeMb: 1536 } });
+    let settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); void worker.terminate(); fn(); };
+    const timer = setTimeout(() => finish(() => reject(new Error(`${format.toUpperCase()} conversion took longer than ${Math.round(timeoutMs / 1000)} s`))), Math.max(1000, timeoutMs));
+    worker.once("message", (message: { error?: string; meshes?: RawMesh[] }) => finish(() => (message.meshes ? resolve(message.meshes) : reject(new Error(`${format.toUpperCase()} ${message.error ?? "conversion failed"}`)))));
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => finish(() => reject(new Error(`${format.toUpperCase()} converter exited (${code})`))));
+  });
 }
 
 // STL is one triangle soup; weld vertices and split it into connected bodies (each body becomes a part).
@@ -151,9 +154,12 @@ function readGlb(bytes: Buffer): RawMesh[] {
   return meshes;
 }
 
-export async function convertCad(bytes: Buffer, name: string, format: CadFormat): Promise<ConvertedCad> {
+// timeoutMs bounds STEP/IGES parsing (STL and GLB are parsed inline; they are fast).
+export async function convertCad(bytes: Buffer, name: string, format: CadFormat, timeoutMs = 90000): Promise<ConvertedCad> {
   const notes: string[] = [];
-  let raw = format === "stl" ? readStl(bytes, name) : format === "glb" ? readGlb(bytes) : await readOcct(bytes, format);
+  const started = Date.now();
+  let raw = format === "stl" ? readStl(bytes, name) : format === "glb" ? readGlb(bytes) : await readOcct(bytes, format, timeoutMs);
+  if (format === "step" || format === "iges") notes.push(`${format.toUpperCase()} parsed in a worker in ${((Date.now() - started) / 1000).toFixed(1)} s.`);
   raw = raw.filter((mesh) => mesh.positions.length >= 9);
   if (!raw.length) throw new Error("no geometry found in CAD file");
   if (raw.length > MAX_PARTS) {
