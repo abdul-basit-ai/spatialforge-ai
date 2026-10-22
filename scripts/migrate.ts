@@ -14,7 +14,7 @@ async function main() {
   const pg = postgres();
   if (!pg) console.log("postgres: DATABASE_URL not set, skipped");
   else {
-    try { await pg.query(readFileSync(join("db", "postgres.sql"), "utf8")); console.log("postgres: db/postgres.sql applied"); }
+    try { for (const file of ["postgres.sql", "forge.sql"]) { await pg.query(readFileSync(join("db", file), "utf8")); console.log(`postgres: db/${file} applied`); } }
     catch (error) { failed = true; console.error("postgres: migration failed:", errorMessage(error)); }
     finally { await pg.end(); }
   }

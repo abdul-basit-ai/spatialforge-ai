@@ -14,7 +14,7 @@ export function clickhouse(): ClickHouseClient | null {
     username: process.env.CLICKHOUSE_USER || "default",
     password: process.env.CLICKHOUSE_PASSWORD || "",
     database: process.env.CLICKHOUSE_DATABASE || "default",
-    request_timeout: 10000,
+    request_timeout: Number(process.env.CLICKHOUSE_TIMEOUT_MS) || 30000,
     tls: ca ? { ca_cert: Buffer.from(ca.join("\n")) } : undefined,
   }));
 }
