@@ -3,10 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import ForgeScene from "@/components/forge/ForgeScene";
 import { ARAssist, ARTrainer } from "@/components/forge/ARModes";
-import { nextSteps, stepById } from "@/lib/forge/engine";
+import { dist, nextSteps, stepById } from "@/lib/forge/engine";
 import { useForgeRun } from "@/lib/forge/run-store";
 import { trackForge } from "@/lib/forge/telemetry";
-import type { ForgeScenario, MistakeReason, StepKind, TrainingMode } from "@/lib/forge/types";
+import type { ForgePart, ForgeScenario, MistakeReason, StepKind, Transform, TrainingMode } from "@/lib/forge/types";
 import { setVoiceEnabled, speak, stopSpeaking } from "@/lib/forge/voice-client";
 import { clearLocalOperator, fetchCoach, fetchMe, fetchScenario, localOperator, type Operator } from "./data";
 import { SignInGate } from "./SignInGate";
@@ -103,6 +103,15 @@ export function Trainer({ id }: { id: string }) {
     if (state.scenario && state.sessionId) trackForge({ type: "forge_hint_shown", scenarioId: state.scenario.id, scenarioVersion: state.scenario.version, sessionId: state.sessionId, operatorId: state.operatorId ?? "anonymous", mode: state.mode, stepId: step.id, message: text, ms: run ? Date.now() - run.stepStartedAt : undefined });
     void speak(text);
   };
+  // A drop counts as an attempt only near the assembly (its own seat or any open seat); setting a part down on the
+  // bench is just rearranging. Whether an attempt is correct is decided by engine.attemptPlace via the store.
+  const dropPart = (partId: string, pose: Transform) => {
+    const state = useForgeRun.getState();
+    if (!state.scenario || !state.run) return;
+    const near = (target: ForgePart | undefined) => Boolean(target && dist(pose.position, target.assembled.position) <= Math.max(target.mate.positionTolerance * 5, 0.03));
+    const open = state.scenario.parts.filter((part) => !state.run!.installed.includes(part.id));
+    if (near(state.scenario.parts.find((part) => part.id === partId)) || open.some(near)) state.place(partId, pose);
+  };
   const signOut = () => { clearLocalOperator(); stopSpeaking(); setOperator(null); };
 
   if (loading) return <div className="forge-app forge-center"><div className="forge-spinner" /><p>Loading scenario…</p></div>;
@@ -146,7 +155,7 @@ export function Trainer({ id }: { id: string }) {
       ) : (
         <div className="forge-trainer-grid">
           <section className={`forge-stage${toast && !toast.ok ? " is-mistake" : ""}`}>
-            {mode === "3d" && <ForgeScene scenario={scenario} run={run} interactive scrambleStaging ghostPartIds={pending} highlightPartIds={highlightIds} selectedPartId={selectedPart} onPartSelect={setSelectedPart} onPartDrop={(partId, pose) => useForgeRun.getState().place(partId, pose)} />}
+            {mode === "3d" && <ForgeScene scenario={scenario} run={run} interactive scrambleStaging ghostPartIds={pending} highlightPartIds={highlightIds} selectedPartId={selectedPart} onPartSelect={setSelectedPart} onPartDrop={dropPart} />}
             {mode === "ar-train" && <ARTrainer scenario={scenario} onExit={() => changeMode("3d")} />}
             {mode === "ar-assist" && <ARAssist scenario={scenario} onExit={() => changeMode("3d")} />}
             {toast && <div key={toast.seq} className={`forge-toast ${toast.ok ? "is-ok" : "is-bad"}`} role="status">{!toast.ok && toast.reason && <b>{REASON_LABEL[toast.reason]}</b>}<span>{toast.text}</span></div>}

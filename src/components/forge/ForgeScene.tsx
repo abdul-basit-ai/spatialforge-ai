@@ -33,7 +33,7 @@ type Entry = {
   flash: { color: THREE.Color; start: number; duration: number } | null;
 };
 
-type Drag = { entry: Entry; pointerId: number; plane: THREE.Plane; offset: THREE.Vector3; raw: THREE.Vector3; startX: number; startY: number; lastY: number; moved: boolean; depthPointer: number | null; depthY: number; snapping: boolean };
+type Drag = { entry: Entry; pointerId: number; plane: THREE.Plane; offset: THREE.Vector3; raw: THREE.Vector3; startX: number; startY: number; lastX: number; lastY: number; moved: boolean; depthPointer: number | null; depthY: number; snapping: boolean };
 
 type Ctx = { sync: (animate: boolean) => void; rotate: (axis: "x" | "y" | "z", dir?: number) => void; frame: () => void; entries: Map<string, Entry> };
 
@@ -91,11 +91,13 @@ export default function ForgeScene(props: ForgeSceneProps) {
     let disposed = false;
     setReady(false);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: transparent, powerPreference: "high-performance" });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // lowered adaptively below if frames are slow
     renderer.setSize(Math.max(el.clientWidth, 1), Math.max(el.clientHeight, 1));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
     renderer.shadowMap.enabled = !transparent; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.autoUpdate = false; // re-rendered only on frames where something moved
+    let pixelRatio = Math.min(window.devicePixelRatio, 2), frameTime = 16, slowFrames = 0, shadowDirty = true;
     const canvas = renderer.domElement;
     canvas.style.display = "block"; canvas.style.width = "100%"; canvas.style.height = "100%"; canvas.style.touchAction = "none"; canvas.style.outline = "none";
     el.appendChild(canvas);
@@ -201,6 +203,7 @@ export default function ForgeScene(props: ForgeSceneProps) {
       for (const rot of [0, Math.PI / 2]) { const bar = new THREE.Mesh(new THREE.PlaneGeometry(radius * 0.18, radius * 0.008), crossMat.clone()); bar.rotation.set(-Math.PI / 2, 0, rot); bar.position.set(center.x, tableY - radius * 0.0005, center.z); bench.add(bar); }
       crossMat.dispose();
       scene.add(bench);
+      shadowDirty = true;
       key.position.set(center.x + radius * 1.6, tableY + radius * 3.2, center.z + radius * 1.2); key.target.position.copy(center);
       const cam = key.shadow.camera; cam.left = cam.bottom = -radius * 1.6; cam.right = cam.top = radius * 1.6; cam.near = radius * 0.1; cam.far = radius * 8; cam.updateProjectionMatrix();
       key.shadow.bias = -0.0004; key.shadow.normalBias = radius * 0.004;
@@ -216,7 +219,7 @@ export default function ForgeScene(props: ForgeSceneProps) {
       if (box.isEmpty()) return;
       const sphere = box.getBoundingSphere(new THREE.Sphere());
       const vFov = THREE.MathUtils.degToRad(camera.fov) / 2, hFov = Math.atan(Math.tan(vFov) * camera.aspect);
-      const distance = (sphere.radius / Math.sin(Math.min(vFov, hFov))) * 1.02;
+      const distance = (sphere.radius / Math.sin(Math.min(vFov, hFov))) * 0.8; // the bench ring is flat, so the sphere over-estimates
       const dir = new THREE.Vector3(0.5, 0.62, 1).normalize();
       const toTarget = sphere.center.clone(); toTarget.y = Math.max(toTarget.y - sphere.radius * 0.12, tableY);
       const toPos = toTarget.clone().addScaledVector(dir, distance);
@@ -272,15 +275,24 @@ export default function ForgeScene(props: ForgeSceneProps) {
       updateSnap();
     };
 
-    // Magnetic preview: within the snap radius the part is pulled halfway toward its seat (the engine still judges the drop).
+    // Magnetic preview: near its seat in 3D, or when the part lines up with its seat on screen (so depth is forgiving
+    // with a mouse), the part is pulled toward the seat and released exactly there. The engine still judges the drop
+    // (order and orientation), so snapping never makes a wrong placement right.
+    // Pixel distance from the seat to the nearer of the part origin and the pointer, on screen.
+    const screenGap = (part: THREE.Vector3, seat: THREE.Vector3, pointerX: number, pointerY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      const toPx = (v: THREE.Vector3) => { const p = tmp.copy(v).project(camera); return [rect.left + ((p.x + 1) * rect.width) / 2, rect.top + ((1 - p.y) * rect.height) / 2]; };
+      const [sx, sy] = toPx(seat), [px, py] = toPx(part);
+      return Math.min(Math.hypot(px - sx, py - sy), Math.hypot(pointerX - sx, pointerY - sy));
+    };
     const updateSnap = () => {
       if (!drag) return;
       const { entry, raw } = drag;
       if (raw.y < tableY) raw.y = tableY;
       const seat = tmp2.set(...entry.part.assembled.position);
-      drag.snapping = raw.distanceTo(seat) < snapRadius(entry);
+      drag.snapping = raw.distanceTo(seat) < snapRadius(entry) || screenGap(raw, seat, drag.lastX, drag.lastY) < 34;
       entry.object.position.copy(raw);
-      if (drag.snapping) entry.object.position.lerp(seat, 0.5);
+      if (drag.snapping) entry.object.position.lerp(seat, 0.8);
     };
 
     const onPointerDown = (event: PointerEvent) => {
@@ -297,7 +309,7 @@ export default function ForgeScene(props: ForgeSceneProps) {
       const hit = raycaster.intersectObject(entry.object, true)[0]?.point ?? entry.object.position.clone();
       camera.getWorldDirection(forward);
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(forward.clone(), hit);
-      drag = { entry, pointerId: event.pointerId, plane, offset: entry.object.position.clone().sub(hit), raw: entry.object.position.clone(), startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false, depthPointer: null, depthY: 0, snapping: false };
+      drag = { entry, pointerId: event.pointerId, plane, offset: entry.object.position.clone().sub(hit), raw: entry.object.position.clone(), startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false, depthPointer: null, depthY: 0, snapping: false };
       canvas.style.cursor = "grabbing";
     };
 
@@ -314,6 +326,7 @@ export default function ForgeScene(props: ForgeSceneProps) {
           ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
           raycaster.setFromCamera(ndc, camera);
           if (raycaster.ray.intersectPlane(drag.plane, tmp)) drag.raw.copy(tmp.add(drag.offset));
+          drag.lastX = event.clientX; drag.lastY = event.clientY;
           updateSnap();
         }
         drag.lastY = event.clientY;
@@ -389,11 +402,15 @@ export default function ForgeScene(props: ForgeSceneProps) {
       const k = 1 - Math.exp(-dt * 11);
       const p = propsRef.current;
       const highlights = p.highlightPartIds ?? EMPTY, ghosts = p.ghostPartIds ?? EMPTY;
+      // Adaptive resolution: sustained slow frames step the pixel ratio down (keeps ~60 fps on weak GPUs).
+      frameTime = frameTime * 0.95 + dt * 1000 * 0.05;
+      if (frameTime > 24 && pixelRatio > 0.75 && ++slowFrames > 90) { pixelRatio = Math.max(0.75, pixelRatio - 0.25); renderer.setPixelRatio(pixelRatio); renderer.setSize(Math.max(el.clientWidth, 1), Math.max(el.clientHeight, 1)); slowFrames = 0; frameTime = 16; }
+      let moving = Boolean(drag);
       for (const entry of entries.values()) {
         const dragging = drag?.entry === entry;
         if (!dragging) {
-          if (entry.object.position.distanceToSquared(entry.targetPos) > 1e-12) entry.object.position.lerp(entry.targetPos, k);
-          if (entry.object.quaternion.angleTo(entry.targetQuat) > 1e-4) entry.object.quaternion.slerp(entry.targetQuat, k);
+          if (entry.object.position.distanceToSquared(entry.targetPos) > 1e-12) { entry.object.position.lerp(entry.targetPos, k); moving = true; }
+          if (entry.object.quaternion.angleTo(entry.targetQuat) > 1e-4) { entry.object.quaternion.slerp(entry.targetQuat, k); moving = true; }
         }
         // Emissive state: flash > selected > highlight > hover > base.
         let color: THREE.Color | null = null, intensity = 0;
@@ -430,6 +447,7 @@ export default function ForgeScene(props: ForgeSceneProps) {
         if (progress >= 1) tween = null;
       }
       controls.update();
+      if (moving || shadowDirty) { renderer.shadowMap.needsUpdate = true; shadowDirty = false; }
       renderer.render(scene, camera);
     });
 
