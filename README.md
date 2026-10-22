@@ -29,8 +29,8 @@ Safari needs HTTPS for camera access. The camera image and hand landmarks stay i
 
 ## Data and services
 
-Runs are stored in localStorage per operator and scenario. The `/admin` page shows placement and correction events for the selected scenario. If Supabase variables are configured, events and passports are also sent to the server routes. Passport validation uses the scenario manifest, required rotations, target IDs, and prerequisite order before persistence.
+Runs are stored in localStorage per operator and scenario. The `/admin` page shows placement and correction events for the selected scenario. When the data services are configured, sessions and passports go to PostgreSQL, every spatial event goes to ClickHouse, and live session state plus the Critic job queue live in Valkey (Aiven in production). Passport validation uses the scenario manifest, required rotations, target IDs, and prerequisite order before persistence.
 
-Copy `.env.example` to `.env.local` for optional Supabase and ElevenLabs services. Browser speech and local storage keep the demo usable without those services. Run `supabase/schema.sql` in the Supabase SQL editor before enabling persistence.
+Copy `.env.example` to `.env.local` for the optional data services and ElevenLabs. Browser speech and local storage keep the demo usable with every variable unset (routes answer `persisted: false`). For local services run `docker compose up -d`, set the localhost URLs from `.env.example`, then `npm run db:migrate` (applies `db/postgres.sql` and `db/clickhouse.sql`) and `npm run db:seed` (30 simulated runs across 10 operators). `GET /api/health` reports reachability of each service. See `DEPLOY.md` for container deployment.
 
 PDF scene compilation, room anchoring, physical-part computer vision verification, and autonomous DAG changes remain future phases.

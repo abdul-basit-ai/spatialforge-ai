@@ -1,0 +1,31 @@
+# Local stand-ins for the Aiven services. Ports are non-default to avoid clashing with other local databases.
+#   docker compose up -d && npm run db:migrate && npm run db:seed
+name: spatialforge
+services:
+  postgres:
+    image: postgres:16
+    container_name: sf-postgres
+    environment:
+      POSTGRES_USER: spatialforge
+      POSTGRES_PASSWORD: spatialforge
+      POSTGRES_DB: spatialforge
+    ports: ["55432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U spatialforge"], interval: 5s, retries: 10 }
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: sf-clickhouse
+    environment:
+      CLICKHOUSE_USER: spatialforge
+      CLICKHOUSE_PASSWORD: spatialforge
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["58123:8123"]
+    ulimits: { nofile: { soft: 262144, hard: 262144 } }
+    volumes: [chdata:/var/lib/clickhouse]
+  valkey:
+    image: valkey/valkey:8
+    container_name: sf-valkey
+    ports: ["56379:6379"]
+volumes:
+  pgdata:
+  chdata:

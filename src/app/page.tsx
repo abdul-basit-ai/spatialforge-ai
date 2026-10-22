@@ -7,8 +7,8 @@ import { ThreeWorkbench } from "@/components/ThreeWorkbench";
 import { MarkerlessAR } from "@/components/MarkerlessAR";
 import { getScenario, normalizeRotation, partFor, SCENARIO_IDS, sceneLayout, slotAt, sourceAt, type PartId, type PlacementMethod, type Point, type ScenarioId } from "@/lib/assembly";
 import { useAssemblyStore } from "@/lib/store";
-import { detectCapabilities, makeSessionId, makeSpatialEvent, validatePlacement } from "@/lib/spatial-engine";
-import { queueSpatialEvent } from "@/lib/telemetry";
+import { DEFAULT_DAG_VERSION, detectCapabilities, makeSessionId, makeSpatialEvent, validatePlacement } from "@/lib/spatial-engine";
+import { queueSpatialEvent, startTelemetrySession, telemetryStamp } from "@/lib/telemetry";
 
 type Mode = "workbench" | "camera";
 type Phase = "searching" | "ready" | "holding" | "over-target" | "wrong-target" | "blocked";
@@ -55,7 +55,7 @@ export default function Home() {
   const trackingLostReportedRef = useRef(false);
   const palmAngleRef = useRef<number | null>(null);
   const sessionRef = useRef(makeSessionId());
-  const eventSequenceRef = useRef(0);
+  const sessionCompletedRef = useRef(false);
   const modeRef = useRef(mode);
   modeRef.current = mode;
   completedRef.current = completed;
@@ -79,7 +79,14 @@ export default function Home() {
     detectCapabilities().then((report) => setCapabilityNote(report.immersiveAr ? "WebXR surface AR ready" : report.camera ? "Camera overlay ready · surface AR falls back here" : "3D workbench ready"));
   }, []);
   const track = (type: string, payload: Record<string, unknown>, source?: "mouse" | "touch" | "gesture" | "xr-controller" | "xr-hand") => {
-    queueSpatialEvent(makeSpatialEvent({ sessionId: sessionRef.current, sequence: ++eventSequenceRef.current, type, at: new Date().toISOString(), mode: modeRef.current === "camera" ? "camera" : "workbench", source, scenario, payload }));
+    queueSpatialEvent(makeSpatialEvent({ ...telemetryStamp(), type, at: new Date().toISOString(), mode: modeRef.current === "camera" ? "camera" : "workbench", source, scenario, operator, payload }));
+  };
+  // Marks the cloud session complete once per run; the server queues a Critic job.
+  const completeSession = () => {
+    if (!started || sessionCompletedRef.current) return;
+    sessionCompletedRef.current = true;
+    track("session_completed", { corrections: errors.length, placements: ids.length });
+    fetch("/api/sessions", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: sessionRef.current, summary: { corrections: errors.length, placements: ids.length, mode: modeRef.current } }) }).catch(() => undefined);
   };
   useEffect(() => {
     const host = stageRef.current;
@@ -154,6 +161,7 @@ export default function Home() {
       clearSelection(); markComplete(id, rotation, method);
       if (navigator.vibrate) navigator.vibrate(60);
       const next = definition.parts.find((candidate) => candidate.id !== id && !completedRef.current.has(candidate.id));
+      if (!next) completeSession();
       setMessage(next ? `${part.short} installed correctly. Select ${next.short} next. ${next.cue}.` : `${definition.name} complete. Your demo passport is ready below.`);
       setVoiceTick((value) => value + 1);
       return;
@@ -289,9 +297,10 @@ export default function Home() {
   };
   const beginSession = async (nextMode: "workbench" | "camera") => {
     sessionRef.current = makeSessionId();
-    eventSequenceRef.current = 0;
+    sessionCompletedRef.current = false;
+    startTelemetrySession(sessionRef.current, DEFAULT_DAG_VERSION);
     const capabilities = await detectCapabilities();
-    fetch("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: sessionRef.current, operator, scenario, mode: nextMode, capabilities }) }).catch(() => undefined);
+    fetch("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: sessionRef.current, operator, scenario, mode: nextMode, dagVersion: DEFAULT_DAG_VERSION, capabilities }) }).catch(() => undefined);
     track("session_started", { capabilities }, nextMode === "camera" ? "gesture" : "mouse");
   };
   const startCamera = () => { clearSelection(); pinchedRef.current = false; trackingLostReportedRef.current = false; setTrackingState("lost"); setPinchActive(false); setMode("camera"); setStarted(true); setImmersive(true); const next = definition.parts.find((part) => !completedRef.current.has(part.id)); setMessage(scenario === "tray" ? "Pinch any available shape in the dock, move it to its matching target, then open your fingers." : next ? `Select ${next.short} first. ${next.cue}. Pinch it in the parts library and follow the insertion arrow.` : `${definition.name} is complete.`); void beginSession("camera"); };

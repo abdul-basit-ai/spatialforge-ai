@@ -1,6 +1,12 @@
-import type { SpatialEvent } from "@/lib/spatial-engine";
+import { DEFAULT_DAG_VERSION, makeSessionId, type SpatialEvent } from "@/lib/spatial-engine";
 
 const QUEUE_KEY = "spatialforge:telemetry:v1";
+
+// Shared session context so page events and store events carry the same sessionId, ordered sequence, and dagVersion.
+let session = { sessionId: makeSessionId(), sequence: 0, dagVersion: DEFAULT_DAG_VERSION };
+export function startTelemetrySession(sessionId: string, dagVersion = DEFAULT_DAG_VERSION) { session = { sessionId, sequence: 0, dagVersion }; }
+export function telemetrySession() { return { sessionId: session.sessionId, dagVersion: session.dagVersion }; }
+export function telemetryStamp() { return { sessionId: session.sessionId, sequence: ++session.sequence, dagVersion: session.dagVersion }; }
 
 function readQueue(): SpatialEvent[] {
   if (typeof window === "undefined") return [];

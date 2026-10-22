@@ -94,10 +94,12 @@ export async function detectCapabilities(): Promise<CapabilityReport> {
   return { browser: ua, secureContext: window.isSecureContext, webgl, camera: Boolean(navigator.mediaDevices?.getUserMedia), mediaPipe: true, immersiveAr, hitTest: immersiveAr, anchors: immersiveAr, immersiveVr };
 }
 
-export type SpatialEvent = { schemaVersion: 1; sessionId: string; sequence: number; type: string; at: string; mode: "workbench" | "camera" | "xr-ar" | "xr-vr"; source?: InteractionSource; scenario: ScenarioId; partId?: PartId; payload: Record<string, unknown> };
+export const DEFAULT_DAG_VERSION = "1.0";
+
+export type SpatialEvent = { schemaVersion: 1; sessionId: string; sequence: number; type: string; at: string; mode: "workbench" | "camera" | "xr-ar" | "xr-vr"; source?: InteractionSource; scenario: ScenarioId; operator?: string; dagVersion: string; partId?: PartId; payload: Record<string, unknown> };
 
 export function makeSessionId() { return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 
-export function makeSpatialEvent(input: Omit<SpatialEvent, "schemaVersion">): SpatialEvent { return { schemaVersion: 1, ...input }; }
+export function makeSpatialEvent(input: Omit<SpatialEvent, "schemaVersion" | "dagVersion"> & { dagVersion?: string }): SpatialEvent { return { schemaVersion: 1, ...input, dagVersion: input.dagVersion || DEFAULT_DAG_VERSION }; }
 
 export type PlacementRecord = { scenario: ScenarioId; partId: PartId; targetId: PartId; rotation: number; method: PlacementMethod; at: string };
