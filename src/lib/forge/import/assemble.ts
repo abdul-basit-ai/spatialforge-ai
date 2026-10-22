@@ -47,7 +47,7 @@ const v3 = (v: THREE.Vector3): Vec3 => [round(v.x), round(v.y), round(v.z)];
 
 // "L_BRACKET_ASSEMBLY_ASM" -> "L bracket assembly", "hex-nut_M3" -> "Hex nut M3"
 export function humanizeName(raw: string): string {
-  const clean = raw.replace(/\.(step|stp|iges|igs|stl|obj|glb|brep)$/i, "").replace(/[_\-]+/g, " ").replace(/\b(asm|prt|sldprt|sldasm)\b/gi, "").replace(/\s+/g, " ").trim();
+  const clean = raw.replace(/\.(step|stp|iges|igs|stl|obj|glb|brep)$/i, "").replace(/[_\-]+/g, " ").replace(/\b(asm|prt|sldprt|sldasm)\b/gi, "").replace(/\s+/g, " ").trim().replace(/(.)\s(mesh|solid|body)$/i, "$1");
   if (!clean) return "Part";
   const words = clean.split(" ").map((word) => (/^[A-Z0-9]+$/.test(word) && word.length > 3 && !/\d/.test(word) ? word.toLowerCase() : word));
   const text = words.join(" ");
