@@ -37,6 +37,7 @@ export type ForgePart = {
   assembled: Transform; // final pose in the assembly frame
   mate: Mate;
   description?: string;
+  bounds?: { size: Vec3 }; // approximate local bounding box (metres, centred on the part origin); derived from primitive params when missing
 };
 
 export type StepKind = "place" | "fasten" | "connect" | "route" | "adjust" | "inspect" | "tool";
