@@ -1,5 +1,6 @@
 "use client";
 
+import PartDock from "./PartDock";
 import { useEffect, useMemo, useState } from "react";
 import ForgeScene from "@/components/forge/ForgeScene";
 import { ARAssist, ARTrainer } from "@/components/forge/ARModes";
@@ -156,6 +157,7 @@ export function Trainer({ id }: { id: string }) {
         <div className="forge-trainer-grid">
           <section className={`forge-stage${toast && !toast.ok ? " is-mistake" : ""}`}>
             {mode === "3d" && <ForgeScene scenario={scenario} run={run} interactive scrambleStaging ghostPartIds={pending} highlightPartIds={highlightIds} selectedPartId={selectedPart} onPartSelect={setSelectedPart} onPartDrop={dropPart} />}
+            {mode === "3d" && !finishedAt && <PartDock scenario={scenario} selectedPartId={selectedPart} onSelect={setSelectedPart} />}
             {mode === "ar-train" && <ARTrainer scenario={scenario} onExit={() => changeMode("3d")} />}
             {mode === "ar-assist" && <ARAssist scenario={scenario} onExit={() => changeMode("3d")} />}
             {toast && <div key={toast.seq} className={`forge-toast ${toast.ok ? "is-ok" : "is-bad"}`} role="status">{!toast.ok && toast.reason && <b>{REASON_LABEL[toast.reason]}</b>}<span>{toast.text}</span></div>}
