@@ -30,8 +30,10 @@ export async function fetchScenarioCards(): Promise<{ cards: ScenarioCard[]; liv
     const json = await response.json() as unknown;
     const list = Array.isArray(json) ? json : (json as { scenarios?: unknown[] }).scenarios ?? [];
     const cards = list.map(asCard).filter((card): card is ScenarioCard => Boolean(card));
-    const ids = new Set(cards.map((card) => card.id));
-    return { cards: [...cards, ...local.filter((card) => !ids.has(card.id))], live: true };
+    // Curated built-ins are the known-good guided lessons. A Studio draft may use
+    // the same slug, but it must not replace the working training card.
+    const builtinIds = new Set(local.map((card) => card.id));
+    return { cards: [...local, ...cards.filter((card) => !builtinIds.has(card.id))], live: true };
   } catch {
     return { cards: local, live: false };
   }
@@ -40,6 +42,11 @@ export async function fetchScenarioCards(): Promise<{ cards: ScenarioCard[]; liv
 const isScenario = (value: unknown): value is ForgeScenario => Boolean(value && typeof value === "object" && Array.isArray((value as ForgeScenario).parts) && Array.isArray((value as ForgeScenario).steps) && typeof (value as ForgeScenario).id === "string");
 
 export async function fetchScenario(id: string): Promise<{ scenario: ForgeScenario | null; from: "api" | "builtin" | "fixture" | null }> {
+  // Keep the tested built-in assemblies deterministic. Stored drafts with a
+  // colliding slug remain editable in Studio, but trainees always receive the
+  // complete SpatialForge sequence with mates, tools, torque and inspection.
+  const builtin = builtinScenario(id);
+  if (builtin) return { scenario: builtin, from: "builtin" };
   try {
     const response = await fetch(`/api/forge/scenarios/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (response.ok) {
@@ -48,8 +55,6 @@ export async function fetchScenario(id: string): Promise<{ scenario: ForgeScenar
       if (isScenario(scenario)) return { scenario: { ...scenario, baseParts: scenario.baseParts ?? [] }, from: "api" };
     }
   } catch { /* fall back below */ }
-  const builtin = builtinScenario(id);
-  if (builtin) return { scenario: builtin, from: "builtin" };
   const fixture = FIXTURE_SCENARIOS.find((scenario) => scenario.id === id) ?? null;
   return { scenario: fixture, from: fixture ? "fixture" : null };
 }
