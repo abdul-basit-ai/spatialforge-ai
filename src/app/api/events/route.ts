@@ -1,4 +1,8 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { getOperator } from "@/lib/auth";
+import { processCriticQueue } from "@/lib/agent/critic";
+import { enqueueForgeCritic, runForgeCritic } from "@/lib/agent/critic-forge";
+import { completeSession, forgeKey, parseForgeEvent, rememberEvents, updateShortTerm, type StoredForgeEvent } from "@/lib/forge/memory";
 import { clickhouse, insertSpatialEvents, type SpatialEventRow } from "@/lib/db/clickhouse";
 import { LIVE_SESSION_TTL_SECONDS, VALKEY_KEYS, valkey } from "@/lib/db/valkey";
 import { errorMessage } from "@/lib/db/tls";
@@ -45,23 +49,64 @@ async function knownSessions(events: Record<string, unknown>[]): Promise<Map<str
   return new Map((rows as SessionRow[]).map((row) => [String(row.id), row]));
 }
 
+// Forge events (type "forge_*") are validated with zod (memory.ts), stored with scenario_id "forge:<id>", folded into
+// short-term memory, and a forge_session_completed updates the long-term profile and queues the Forge Critic.
+// The operator comes from the sf_op cookie when present; otherwise the body's operatorId is kept but marked unverified.
+function forgeRow(event: StoredForgeEvent): SpatialEventRow {
+  const { operatorId: _operatorId, ...rest } = event;
+  return {
+    session_id: event.sessionId, sequence: event.sequence, event_type: event.type, scenario_id: forgeKey(event.scenarioId), operator_code: event.operatorId,
+    dag_version: String(event.scenarioVersion), mode: event.mode, source: event.operatorVerified ? "forge" : "forge-unverified",
+    part_id: event.partId ?? "", target_id: event.stepId ?? "", rotation: null, payload: JSON.stringify({ ...rest, operatorId: event.operatorId }).slice(0, 8000), at: event.at,
+  };
+}
+
+async function afterForge(events: StoredForgeEvent[]) {
+  const result = { memory: false, completed: 0, queued: 0 };
+  if (!events.length) return result;
+  try { await updateShortTerm(events); result.memory = true; } catch (error) { console.error("events: forge short-term memory failed", errorMessage(error)); }
+  const completions = new Map(events.filter((event) => event.type === "forge_session_completed" && event.operatorId).map((event) => [event.sessionId, event]));
+  for (const event of completions.values()) {
+    try {
+      const { counted } = await completeSession(event, events);
+      if (!counted) continue;
+      result.completed++;
+      if (await enqueueForgeCritic({ scenarioId: event.scenarioId, version: event.scenarioVersion, operatorId: event.operatorId, sessionId: event.sessionId, completedAt: event.at })) result.queued++;
+      else after(() => runForgeCritic({ scenarioId: event.scenarioId, operator: event.operatorId, sessionId: event.sessionId }).then(() => undefined));
+    } catch (error) { console.error("events: forge session completion failed", errorMessage(error)); }
+  }
+  // The Critic runs right after the response; the admin "Run critic" button drains anything left in the queue.
+  if (result.queued) after(() => processCriticQueue(result.queued).then(() => undefined).catch((error) => console.error("events: critic run failed", errorMessage(error))));
+  return result;
+}
+
 export async function POST(request: Request) {
   if (Number(request.headers.get("content-length") || 0) > MAX_BODY_BYTES) return NextResponse.json({ error: "Batch too large" }, { status: 413 });
   const body = await request.json().catch(() => null) as { events?: unknown[] } | Record<string, unknown> | null;
-  const events = Array.isArray((body as { events?: unknown[] } | null)?.events) ? (body as { events: unknown[] }).events : [body];
-  if (!events.length || events.length > MAX_BATCH || events.some((event) => !event || typeof event !== "object" || typeof (event as { type?: unknown }).type !== "string")) return NextResponse.json({ error: "Invalid event" }, { status: 400 });
-  let sessions: Map<string, SessionRow> | null;
-  try { sessions = await knownSessions(events as Record<string, unknown>[]); }
-  catch (error) { console.error("events: session lookup failed", errorMessage(error)); return NextResponse.json({ ok: false, error: "Session store unavailable" }, { status: 502 }); }
+  const all = Array.isArray((body as { events?: unknown[] } | null)?.events) ? (body as { events: unknown[] }).events : [body];
+  if (!all.length || all.length > MAX_BATCH || all.some((event) => !event || typeof event !== "object" || typeof (event as { type?: unknown }).type !== "string")) return NextResponse.json({ error: "Invalid event" }, { status: 400 });
+  const isForge = (event: unknown) => (event as { type: string }).type.startsWith("forge_");
+  const cookieOperator = getOperator(request)?.id ?? null;
+  const forgeEvents = all.filter(isForge).map((event) => parseForgeEvent(event, cookieOperator)).filter((event): event is StoredForgeEvent => Boolean(event));
+  const forgeDropped = all.filter(isForge).length - forgeEvents.length;
+  const events = all.filter((event) => !isForge(event));
+  let sessions: Map<string, SessionRow> | null = null;
+  if (events.length) {
+    try { sessions = await knownSessions(events as Record<string, unknown>[]); }
+    catch (error) { console.error("events: session lookup failed", errorMessage(error)); return NextResponse.json({ ok: false, error: "Session store unavailable" }, { status: 502 }); }
+  }
   // Invalid events are dropped (not rejected) so a client queue holding one bad event cannot block the rest forever.
-  const rows = events.map((event) => toRow(event as Record<string, unknown>, sessions)).filter((row): row is SpatialEventRow => Boolean(row));
-  const dropped = events.length - rows.length;
+  const legacyRows = events.map((event) => toRow(event as Record<string, unknown>, sessions)).filter((row): row is SpatialEventRow => Boolean(row));
+  const rows = [...legacyRows, ...forgeEvents.map(forgeRow)];
+  const dropped = events.length - legacyRows.length + forgeDropped;
   if (!rows.length) return NextResponse.json({ ok: true, persisted: false, live: false, count: 0, dropped });
   const ch = clickhouse();
   if (ch) {
     try { await insertSpatialEvents(ch, rows); }
     catch (error) { console.error("events: clickhouse insert failed", errorMessage(error)); return NextResponse.json({ ok: false, error: "Event store unavailable" }, { status: 502 }); }
-  }
+  } else rememberEvents(forgeEvents);
+  const forge = await afterForge(forgeEvents);
+  if (!legacyRows.length) return NextResponse.json({ ok: true, persisted: Boolean(ch), live: forge.memory, count: rows.length, dropped, forge: { count: forgeEvents.length, verified: Boolean(cookieOperator), completed: forge.completed, criticQueued: forge.queued } });
   // Live session state is best effort: a Valkey outage must not drop events that already reached ClickHouse.
   const cache = valkey();
   let live = false;
@@ -69,7 +114,7 @@ export async function POST(request: Request) {
     try {
       const latest = new Map<string, SpatialEventRow>();
       const counts = new Map<string, number>();
-      for (const row of rows) if (row.session_id) { latest.set(row.session_id, row); counts.set(row.session_id, (counts.get(row.session_id) || 0) + 1); }
+      for (const row of legacyRows) if (row.session_id) { latest.set(row.session_id, row); counts.set(row.session_id, (counts.get(row.session_id) || 0) + 1); }
       if (latest.size) {
         const pipeline = cache.multi();
         for (const [id, row] of latest) {
@@ -83,5 +128,5 @@ export async function POST(request: Request) {
       }
     } catch (error) { console.error("events: valkey update failed", errorMessage(error)); }
   }
-  return NextResponse.json({ ok: true, persisted: Boolean(ch), live, count: rows.length, dropped });
+  return NextResponse.json({ ok: true, persisted: Boolean(ch), live, count: rows.length, dropped, ...(forgeEvents.length ? { forge: { count: forgeEvents.length, verified: Boolean(cookieOperator), completed: forge.completed, criticQueued: forge.queued } } : {}) });
 }

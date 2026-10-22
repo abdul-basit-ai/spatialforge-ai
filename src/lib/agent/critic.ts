@@ -7,6 +7,7 @@ import { postgres } from "@/lib/db/postgres";
 import { allowLlmCall, valkey, VALKEY_KEYS, withTimeout, type CriticJob } from "@/lib/db/valkey";
 import { errorMessage } from "@/lib/db/tls";
 import { activeGuidance, isOperator, isScenario } from "./guidance-store";
+import { isForgeScenarioKey, runForgeCritic, type ForgeCriticOutcome } from "./critic-forge";
 import { completeJson, llmConfigured, type ChatMessage } from "./llm";
 import { runTool, TOOL_DESCRIPTIONS, TOOL_NAMES, type OperatorMistakes, type StepRate, type ToolArgs, type ToolName, type ToolResults, type WrongOrder } from "./tools";
 
@@ -188,10 +189,11 @@ async function requeueAbandoned(cache: NonNullable<ReturnType<typeof valkey>>) {
   }
 }
 
-export async function processCriticQueue(max = 1): Promise<{ results: CriticOutcome[]; queueEmpty: boolean; queueAvailable: boolean }> {
+// Forge jobs (scenario "forge:<id>") share the queue and are dispatched to the Forge Critic.
+export async function processCriticQueue(max = 1): Promise<{ results: Array<CriticOutcome | ForgeCriticOutcome>; queueEmpty: boolean; queueAvailable: boolean }> {
   const cache = valkey();
   if (!cache) return { results: [], queueEmpty: true, queueAvailable: false };
-  const results: CriticOutcome[] = [];
+  const results: Array<CriticOutcome | ForgeCriticOutcome> = [];
   const startedAt = Date.now();
   await requeueAbandoned(cache).catch((error) => console.error("critic: requeue failed", errorMessage(error)));
   for (let index = 0; index < max && (index === 0 || Date.now() - startedAt < START_BUDGET_MS); index++) {
@@ -201,6 +203,13 @@ export async function processCriticQueue(max = 1): Promise<{ results: CriticOutc
     const done = () => cache.multi().lrem(VALKEY_KEYS.criticProcessing, 1, raw).del(claimKey(raw)).exec().catch(() => undefined);
     let job: CriticJob;
     try { job = JSON.parse(raw) as CriticJob; } catch { await done(); continue; }
+    if (isForgeScenarioKey(job.scenario)) {
+      const forge = await runForgeCritic({ scenarioId: job.scenario.slice(6), operator: typeof job.operator === "string" ? job.operator.slice(0, 64) : "", sessionId: job.sessionId });
+      results.push(forge);
+      if (!forge.ok) await cache.lpush(VALKEY_KEYS.criticFailed, JSON.stringify({ ...job, error: forge.error, failedAt: new Date().toISOString() })).catch(() => undefined);
+      await done();
+      continue;
+    }
     if (!isScenario(job.scenario) || !isOperator(job.operator)) { await done(); continue; }
     const result = await runCritic({ scenario: job.scenario, operator: job.operator, sessionId: job.sessionId });
     results.push(result);
